@@ -392,6 +392,15 @@
         background: var(--figma-color-bg-hover);
         color: var(--figma-color-text);
       }
+
+      .plugin-version-footer {
+        margin: 14px 0 0;
+        padding-top: 10px;
+        border-top: 1px solid var(--figma-color-border);
+        font-size: 10px;
+        color: var(--figma-color-text-secondary);
+        font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;
+      }
     </style>
   </head>
   <body>
@@ -519,6 +528,10 @@
       </details>
     </div>
 
+    <p id="pluginVersionFooter" class="plugin-version-footer" aria-live="polite">
+      Версия: …
+    </p>
+
     <script>
       const tabRaster = document.getElementById("tabRaster");
       const tabMo4 = document.getElementById("tabMo4");
@@ -588,6 +601,12 @@
       const updateBannerEl = document.getElementById("updateBanner");
       const updateBannerBodyEl = document.getElementById("updateBannerBody");
       const updateBannerDismissEl = document.getElementById("updateBannerDismiss");
+      const pluginVersionFooterEl = document.getElementById("pluginVersionFooter");
+
+      function setPluginVersionFooterLabel(version) {
+        const value = typeof version === "string" && version.length > 0 ? version : "—";
+        pluginVersionFooterEl.textContent = "Версия: " + value;
+      }
 
       let pluginCurrentVersion = "";
       let dismissedRemoteVersion = null;
@@ -657,7 +676,7 @@
           remoteVersion +
           "</strong> (у вас " +
           pluginCurrentVersion +
-          '). Закройте плагин в Figma, откройте <strong>папку с клоном репозитория</strong> и запустите <code>UPDATE.bat</code> — выполнится <code>git pull</code>, <code>npm install</code> и <code>npm run build</code>. Нужен установленный Git и клон с GitHub, не только архив без .git.';
+          '). Закройте плагин в Figma, откройте <strong>папку с клоном репозитория</strong> и запустите <code>UPDATE.bat</code>.';
         updateBannerEl.classList.add("is-visible");
       }
 
@@ -773,9 +792,14 @@
           return;
         }
         if (msg.type === "pluginVersion") {
-          pluginCurrentVersion =
+          const nextVersion =
             typeof msg.version === "string" ? msg.version : "";
-          postToPlugin({ type: "getUpdateBannerDismissed" });
+          const previousVersion = pluginCurrentVersion;
+          pluginCurrentVersion = nextVersion;
+          setPluginVersionFooterLabel(nextVersion);
+          if (nextVersion.length > 0 && nextVersion !== previousVersion) {
+            postToPlugin({ type: "getUpdateBannerDismissed" });
+          }
           return;
         }
         if (msg.type === "updateBannerDismissed") {
@@ -851,7 +875,16 @@
         }
       };
 
-      postToPlugin({ type: "requestPluginVersion" });
+      function requestPluginVersionFromMain() {
+        postToPlugin({ type: "requestPluginVersion" });
+      }
+
+      requestPluginVersionFromMain();
+      if (document.readyState !== "complete") {
+        window.addEventListener("load", requestPluginVersionFromMain);
+      }
+      setTimeout(requestPluginVersionFromMain, 200);
+      setTimeout(requestPluginVersionFromMain, 800);
     </script>
   </body>
 </html>

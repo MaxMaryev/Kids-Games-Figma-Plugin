@@ -18,7 +18,14 @@ figma.showUI(__html__, {
   title: "😊 Kids Games Plugin 😊",
 });
 
-figma.ui.postMessage({ type: "pluginVersion", version: __PLUGIN_VERSION__ });
+function postPluginVersionToUi(): void {
+  figma.ui.postMessage({ type: "pluginVersion", version: __PLUGIN_VERSION__ });
+}
+
+// Синхронный postMessage часто уходит до того, как iframe повесит onmessage.
+postPluginVersionToUi();
+setTimeout(postPluginVersionToUi, 120);
+setTimeout(postPluginVersionToUi, 400);
 
 function focusSceneNodeById(nodeId: string): void {
   const node = figma.getNodeById(nodeId);
