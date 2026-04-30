@@ -2,10 +2,10 @@
 chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
-echo Updating Kids Games Figma Plugin...
-git pull origin main
+echo Updating Kids Games Figma Plugin from GitHub (no Git)...
+node update-plugin.cjs
 if errorlevel 1 (
-  echo Git pull failed. Use a Git clone of the repo and ensure Git is installed.
+  echo Update failed. Need Node.js, curl and tar (Windows 10+).
   pause
   exit /b 1
 )
