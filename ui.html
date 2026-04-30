@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <title>😊 Kids Games Plugin 😊</title>
+    <style>
+      :root {
+        --accent: #8b5cf6;
+        --accent-hover: #7c3aed;
+        --accent-soft: rgba(139, 92, 246, 0.12);
+        --radius-sm: 6px;
+        --radius-md: 10px;
+        --radius-lg: 14px;
+        --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        font: 12px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", system-ui,
+          sans-serif;
+        margin: 0;
+        padding: 14px;
+        color: var(--figma-color-text);
+        background: var(--figma-color-bg);
+      }
+
+      /* Сегментированные вкладки */
+      .tabs {
+        display: flex;
+        gap: 4px;
+        padding: 3px;
+        margin-bottom: 14px;
+        border-radius: var(--radius-md);
+        background: var(--figma-color-bg-secondary);
+      }
+      .tabs button {
+        flex: 1;
+        margin: 0;
+        padding: 7px 10px;
+        border: none;
+        background: transparent;
+        color: var(--figma-color-text-secondary);
+        cursor: pointer;
+        font: inherit;
+        font-weight: 500;
+        border-radius: calc(var(--radius-md) - 3px);
+        transition: background 0.15s ease, color 0.15s ease;
+      }
+      .tabs button:hover {
+        color: var(--figma-color-text);
+      }
+      .tabs button[aria-selected="true"] {
+        background: var(--figma-color-bg);
+        color: var(--figma-color-text);
+        box-shadow: var(--shadow-sm);
+      }
+
+      /* Сегмент «Оригинал» */
+      .segmented {
+        display: flex;
+        gap: 2px;
+        padding: 3px;
+        margin-top: 2px;
+        border-radius: var(--radius-md);
+        background: var(--figma-color-bg-secondary);
+      }
+      .segmented button {
+        flex: 1;
+        margin: 0;
+        padding: 7px 6px;
+        border: none;
+        background: transparent;
+        color: var(--figma-color-text-secondary);
+        cursor: pointer;
+        font: inherit;
+        font-size: 11px;
+        font-weight: 500;
+        border-radius: calc(var(--radius-md) - 3px);
+        transition: background 0.15s ease, color 0.15s ease;
+      }
+      .segmented button:hover {
+        color: var(--figma-color-text);
+      }
+      .segmented button[aria-checked="true"] {
+        background: var(--figma-color-bg);
+        color: var(--figma-color-text);
+        box-shadow: var(--shadow-sm);
+      }
+
+      .panel {
+        display: none;
+      }
+      .panel.is-active {
+        display: block;
+      }
+
+      /* Подсказки */
+      .hint {
+        font-size: 11px;
+        color: var(--figma-color-text-secondary);
+        margin: 0 0 4px;
+        line-height: 1.5;
+      }
+      .hint code {
+        font-size: 10.5px;
+        padding: 1px 5px;
+        border-radius: 4px;
+        background: var(--figma-color-bg-secondary);
+        font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;
+      }
+
+      /* Поля */
+      .field {
+        display: block;
+        margin: 14px 0 6px;
+        font-weight: 500;
+      }
+
+      select {
+        width: 100%;
+        padding: 8px 10px;
+        border: 1px solid var(--figma-color-border);
+        border-radius: var(--radius-sm);
+        background: var(--figma-color-bg);
+        color: var(--figma-color-text);
+        font: inherit;
+        cursor: pointer;
+      }
+      select:focus {
+        outline: none;
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px var(--accent-soft);
+      }
+
+      /* Кнопки */
+      .actions-row {
+        display: flex;
+        gap: 8px;
+        margin-top: 12px;
+      }
+      .actions-row button {
+        flex: 1;
+      }
+
+      button.primary,
+      button.secondary {
+        margin: 0;
+        padding: 9px 12px;
+        border-radius: var(--radius-sm);
+        border: none;
+        cursor: pointer;
+        font: inherit;
+        font-weight: 500;
+        transition: background 0.15s ease, transform 0.05s ease;
+      }
+      button.primary {
+        background: var(--accent);
+        color: #fff;
+      }
+      button.primary:hover:not(:disabled) {
+        background: var(--accent-hover);
+      }
+      button.primary:active:not(:disabled) {
+        transform: translateY(0.5px);
+      }
+      button.secondary {
+        background: var(--figma-color-bg-secondary);
+        color: var(--figma-color-text);
+      }
+      button.secondary:hover:not(:disabled) {
+        background:
+          linear-gradient(var(--accent-soft), var(--accent-soft)),
+          var(--figma-color-bg-hover);
+      }
+      button.action-full {
+        width: 100%;
+        margin-top: 14px;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      /* Статус */
+      .status {
+        margin-top: 12px;
+        padding: 8px 10px;
+        border-radius: var(--radius-sm);
+        background: var(--figma-color-bg-secondary);
+        color: var(--figma-color-text-secondary);
+        font-size: 11px;
+        white-space: pre-wrap;
+        max-height: 92px;
+        overflow-y: auto;
+      }
+      .status:empty {
+        display: none;
+      }
+
+      /* Список нарушений */
+      .list-wrap {
+        margin-top: 12px;
+        border-radius: var(--radius-sm);
+        background: var(--figma-color-bg-secondary);
+        overflow: hidden;
+      }
+      .list-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 6px 10px;
+        font-size: 10px;
+        font-weight: 600;
+        color: var(--figma-color-text-secondary);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+      .list-header button.linkish {
+        margin: 0;
+        padding: 4px 8px;
+        border: none;
+        background: transparent;
+        color: var(--accent);
+        cursor: pointer;
+        font: inherit;
+        font-size: 11px;
+        font-weight: 500;
+        text-transform: none;
+        letter-spacing: 0;
+        border-radius: 4px;
+        transition: background 0.15s ease, opacity 0.15s ease;
+      }
+      .list-header button.linkish:hover:not(:disabled) {
+        background: var(--accent-soft);
+      }
+      .list-header button.linkish:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      .list-body {
+        max-height: 160px;
+        overflow-y: auto;
+        background: var(--figma-color-bg);
+      }
+      .list-empty {
+        padding: 16px 10px;
+        color: var(--figma-color-text-secondary);
+        font-size: 11px;
+        text-align: center;
+        line-height: 1.5;
+      }
+      .list-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 10px;
+        border-bottom: 1px solid var(--figma-color-border);
+        cursor: pointer;
+        transition: background 0.15s ease;
+      }
+      .list-item:hover {
+        background: var(--figma-color-bg-hover);
+      }
+      .list-item:last-child {
+        border-bottom: none;
+      }
+      .list-item-main {
+        flex: 1;
+        min-width: 0;
+      }
+      .list-item-name {
+        font-weight: 500;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .list-item-meta {
+        font-size: 11px;
+        color: var(--figma-color-text-secondary);
+        margin-top: 2px;
+      }
+      .list-item button.linkish {
+        flex-shrink: 0;
+        margin: 0;
+        padding: 4px 8px;
+        border: none;
+        background: transparent;
+        color: var(--accent);
+        cursor: pointer;
+        font: inherit;
+        font-weight: 500;
+        border-radius: 4px;
+        transition: background 0.15s ease;
+      }
+      .list-item button.linkish:hover {
+        background: var(--accent-soft);
+      }
+
+      /* «Как это работает» */
+      details {
+        margin-top: 14px;
+        font-size: 11px;
+        color: var(--figma-color-text-secondary);
+      }
+      details summary {
+        cursor: pointer;
+        color: var(--figma-color-text);
+        padding: 6px 0;
+        list-style: none;
+        font-weight: 500;
+        user-select: none;
+      }
+      details summary::-webkit-details-marker {
+        display: none;
+      }
+      details summary::before {
+        content: "›";
+        display: inline-block;
+        width: 12px;
+        margin-right: 4px;
+        color: var(--figma-color-text-secondary);
+        transition: transform 0.15s ease;
+      }
+      details[open] summary::before {
+        transform: rotate(90deg);
+      }
+      details ul {
+        margin: 4px 0 0;
+        padding-left: 18px;
+      }
+      details li {
+        margin: 4px 0;
+        line-height: 1.5;
+      }
+      details code {
+        font-size: 10.5px;
+        padding: 1px 5px;
+        border-radius: 4px;
+        background: var(--figma-color-bg-secondary);
+        font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="tabs" role="tablist" aria-label="Разделы плагина">
+      <button
+        type="button"
+        role="tab"
+        id="tabRaster"
+        aria-selected="true"
+        aria-controls="panelRaster"
+      >
+        Растр
+      </button>
+      <button
+        type="button"
+        role="tab"
+        id="tabMo4"
+        aria-selected="false"
+        aria-controls="panelMo4"
+      >
+        Кратность 4
+      </button>
+    </div>
+
+    <div
+      id="panelRaster"
+      class="panel is-active"
+      role="tabpanel"
+      aria-labelledby="tabRaster"
+    >
+      <p class="hint">
+        Превращает выделенный слой в PNG прямо на канвасе — прямоугольник
+        с картинкой-заливкой.
+      </p>
+
+      <label class="field" for="scale">Масштаб</label>
+      <select id="scale" aria-label="Масштаб экспорта">
+        <option value="1">1×</option>
+        <option value="2">2×</option>
+        <option value="3">3×</option>
+        <option value="4">4×</option>
+      </select>
+
+      <div class="field" id="originalDispositionLabel">Оригинал</div>
+      <div
+        class="segmented"
+        id="originalDisposition"
+        role="radiogroup"
+        aria-labelledby="originalDispositionLabel"
+      >
+        <button type="button" role="radio" aria-checked="true" data-value="keep" tabindex="0">
+          Оставить
+        </button>
+        <button type="button" role="radio" aria-checked="false" data-value="replace" tabindex="-1">
+          Заменить
+        </button>
+        <button type="button" role="radio" aria-checked="false" data-value="hide" tabindex="-1">
+          Скрыть
+        </button>
+      </div>
+
+      <button type="button" class="primary action-full" id="goRaster">В растр</button>
+      <div class="status" id="rasterStatus" role="status"></div>
+    </div>
+
+    <div id="panelMo4" class="panel" role="tabpanel" aria-labelledby="tabMo4">
+      <p class="hint">
+        Проверяет, что ширина и высота слоя кратны 4. Считает по визуальному
+        боксу — с учётом теней, обводок и размытий.
+      </p>
+
+      <div class="actions-row">
+        <button type="button" class="secondary" id="mo4Check">Проверить</button>
+        <button type="button" class="primary" id="mo4Fix">Поправить</button>
+      </div>
+
+      <div class="list-wrap" aria-label="Список нарушений">
+        <div class="list-header">
+          <span id="mo4ListTitle">Слои с нарушением</span>
+          <button
+            type="button"
+            class="linkish"
+            id="mo4SelectAll"
+            disabled
+            aria-label="Выделить все слои с нарушением"
+          >
+            Выделить все
+          </button>
+        </div>
+        <div class="list-body" id="mo4ListBody"></div>
+      </div>
+
+      <div class="status" id="mo4Status" role="status"></div>
+
+      <details>
+        <summary>Как это работает</summary>
+        <ul>
+          <li>
+            <b>Проверить</b> оставит в выделении только те слои, чьи размеры
+            не кратны 4, и покажет их списком.
+          </li>
+          <li>
+            <b>Поправить</b> оборачивает слой фреймом нужного размера. Сама
+            графика не растягивается: меняется только контейнер, а
+            содержимое сдвигается внутри так, чтобы визуально остаться на месте.
+          </li>
+          <li>
+            После Поправить выделены обёртки. Исходный слой переименован
+            в <code>[no4] имя</code> — чтобы видно было, какие слои изначально
+            не проходили проверку.
+          </li>
+        </ul>
+      </details>
+    </div>
+
+    <script>
+      const tabRaster = document.getElementById("tabRaster");
+      const tabMo4 = document.getElementById("tabMo4");
+      const panelRaster = document.getElementById("panelRaster");
+      const panelMo4 = document.getElementById("panelMo4");
+      const rasterStatusEl = document.getElementById("rasterStatus");
+      const mo4StatusEl = document.getElementById("mo4Status");
+      const scaleEl = document.getElementById("scale");
+      const originalDispositionEl = document.getElementById("originalDisposition");
+      const goRasterEl = document.getElementById("goRaster");
+      const mo4CheckEl = document.getElementById("mo4Check");
+      const mo4FixEl = document.getElementById("mo4Fix");
+      const mo4ListTitleEl = document.getElementById("mo4ListTitle");
+      const mo4ListBodyEl = document.getElementById("mo4ListBody");
+      const mo4SelectAllEl = document.getElementById("mo4SelectAll");
+      let mo4ViolationIds = [];
+
+      function pluralLayers(n) {
+        const mod10 = n % 10;
+        const mod100 = n % 100;
+        if (mod100 >= 11 && mod100 <= 14) return n + " слоёв";
+        if (mod10 === 1) return n + " слой";
+        if (mod10 >= 2 && mod10 <= 4) return n + " слоя";
+        return n + " слоёв";
+      }
+
+      function setTab(which) {
+        const isRaster = which === "raster";
+        tabRaster.setAttribute("aria-selected", isRaster ? "true" : "false");
+        tabMo4.setAttribute("aria-selected", isRaster ? "false" : "true");
+        panelRaster.classList.toggle("is-active", isRaster);
+        panelMo4.classList.toggle("is-active", !isRaster);
+        if (isRaster) {
+          mo4StatusEl.textContent = "";
+        } else {
+          rasterStatusEl.textContent = "";
+        }
+      }
+
+      tabRaster.addEventListener("click", () => setTab("raster"));
+      tabMo4.addEventListener("click", () => setTab("mo4"));
+
+      let originalDisposition = "keep";
+      const dispositionRadios = originalDispositionEl.querySelectorAll('[role="radio"]');
+      dispositionRadios.forEach((button) => {
+        button.addEventListener("click", () => {
+          const value = button.getAttribute("data-value");
+          if (!value) {
+            return;
+          }
+          originalDisposition = value;
+          dispositionRadios.forEach((other) => {
+            const selected = other === button;
+            other.setAttribute("aria-checked", selected ? "true" : "false");
+            other.tabIndex = selected ? 0 : -1;
+          });
+        });
+      });
+
+      function postToPlugin(message) {
+        parent.postMessage({ pluginMessage: message }, "*");
+      }
+
+      function setMo4Busy(busy, label) {
+        mo4CheckEl.disabled = busy;
+        mo4FixEl.disabled = busy;
+        if (busy) {
+          mo4CheckEl.textContent = label || "Обработка…";
+          mo4FixEl.textContent = label || "Обработка…";
+        } else {
+          mo4CheckEl.textContent = "Проверить";
+          mo4FixEl.textContent = "Поправить";
+        }
+      }
+
+      function renderMo4List(violations) {
+        mo4ListBodyEl.innerHTML = "";
+        mo4ViolationIds = (violations || []).map((v) => v.nodeId);
+        mo4SelectAllEl.disabled = mo4ViolationIds.length === 0;
+        if (!violations || violations.length === 0) {
+          mo4ListTitleEl.textContent = "Слои с нарушением (0)";
+          const empty = document.createElement("div");
+          empty.className = "list-empty";
+          empty.textContent =
+            "Нажмите «Проверить», чтобы посмотреть выделение.";
+          mo4ListBodyEl.appendChild(empty);
+          return;
+        }
+        mo4ListTitleEl.textContent =
+          "Слои с нарушением (" + violations.length + ")";
+        for (const item of violations) {
+          const row = document.createElement("div");
+          row.className = "list-item";
+          const main = document.createElement("div");
+          main.className = "list-item-main";
+          const nameEl = document.createElement("div");
+          nameEl.className = "list-item-name";
+          nameEl.textContent = item.name;
+          nameEl.title = item.name;
+          const meta = document.createElement("div");
+          meta.className = "list-item-meta";
+          meta.textContent =
+            item.width +
+            "×" +
+            item.height +
+            " → " +
+            item.targetWidth +
+            "×" +
+            item.targetHeight;
+          main.appendChild(nameEl);
+          main.appendChild(meta);
+          const showBtn = document.createElement("button");
+          showBtn.type = "button";
+          showBtn.className = "linkish";
+          showBtn.textContent = "Показать";
+          showBtn.addEventListener("click", (event) => {
+            event.stopPropagation();
+            postToPlugin({ type: "focusNode", nodeId: item.nodeId });
+          });
+          row.addEventListener("click", () => {
+            postToPlugin({ type: "focusNode", nodeId: item.nodeId });
+          });
+          row.appendChild(main);
+          row.appendChild(showBtn);
+          mo4ListBodyEl.appendChild(row);
+        }
+      }
+
+      renderMo4List([]);
+
+      goRasterEl.addEventListener("click", () => {
+        rasterStatusEl.textContent = "Обработка…";
+        goRasterEl.disabled = true;
+        postToPlugin({
+          type: "rasterize",
+          scale: parseFloat(scaleEl.value),
+          originalDisposition,
+        });
+      });
+
+      mo4CheckEl.addEventListener("click", () => {
+        mo4StatusEl.textContent = "";
+        setMo4Busy(true);
+        postToPlugin({ type: "multipleOfFourCheck" });
+      });
+
+      mo4SelectAllEl.addEventListener("click", () => {
+        if (mo4ViolationIds.length === 0) return;
+        postToPlugin({ type: "selectNodes", nodeIds: mo4ViolationIds });
+      });
+
+      mo4FixEl.addEventListener("click", () => {
+        mo4StatusEl.textContent = "";
+        setMo4Busy(true);
+        postToPlugin({ type: "multipleOfFourFix" });
+      });
+
+      window.onmessage = (event) => {
+        const msg = event.data.pluginMessage;
+        if (!msg || !msg.type) {
+          return;
+        }
+        if (msg.type === "done") {
+          goRasterEl.disabled = false;
+          if (msg.ok) {
+            rasterStatusEl.textContent =
+              "Готово — обработано " + pluralLayers(msg.done) + ".";
+            return;
+          }
+          let text = "";
+          if (msg.done > 0) {
+            text += "Обработано: " + pluralLayers(msg.done) + ".\n";
+          }
+          if (msg.errors && msg.errors.length) {
+            text += msg.errors.join("\n");
+          } else if (msg.error) {
+            text += msg.error;
+          } else {
+            text += "Что-то пошло не так.";
+          }
+          rasterStatusEl.textContent = text;
+          return;
+        }
+        if (msg.type === "multipleOfFourCheckResult") {
+          setMo4Busy(false);
+          renderMo4List(msg.violations || []);
+          const parts = [];
+          if (msg.violations && msg.violations.length) {
+            parts.push(
+              "Нашлось " +
+                pluralLayers(msg.violations.length) +
+                " с нарушением — оставил их в выделении."
+            );
+          } else {
+            parts.push("Все слои кратны 4 — нарушений нет.");
+          }
+          if (msg.skipped && msg.skipped.length) {
+            parts.push("Пропущено: " + msg.skipped.length + ".");
+          }
+          mo4StatusEl.textContent = parts.join(" ");
+          return;
+        }
+        if (msg.type === "multipleOfFourFixResult") {
+          setMo4Busy(false);
+          let text = "";
+          if (msg.fixedParents > 0) {
+            text +=
+              "Обернуто: " + pluralLayers(msg.fixedParents) + ".";
+          }
+          if (msg.skipped > 0) {
+            text +=
+              (text ? " " : "") +
+              "Пропущено: " +
+              msg.skipped +
+              " (уже кратны 4 или нет данных).";
+          }
+          if (msg.errors && msg.errors.length) {
+            text += (text ? "\n" : "") + msg.errors.join("\n");
+          }
+          if (!text) {
+            text = msg.ok ? "Готово." : "Что-то пошло не так.";
+          }
+          mo4StatusEl.textContent = text;
+        }
+      };
+    </script>
+  </body>
+</html>
