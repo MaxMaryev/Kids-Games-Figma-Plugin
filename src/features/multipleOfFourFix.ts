@@ -127,9 +127,10 @@ function wrapSceneNodeInFixFrame(node: SceneNode): FrameNode {
 }
 
 /**
- * Применяет паддинг к существующей обёртке.
- * Если задан originalRenderBounds — использует его как опорный (нужно сразу после wrap,
- * пока absoluteRenderBounds обёртки могут не успеть пересчитаться). Иначе читает с обёртки.
+ * Подгоняет размер и положение обёртки под absoluteRenderBounds контента (обводки и т.д.)
+ * и при необходимости добавляет паддинг до кратности 4. Выполняется и когда размеры
+ * уже кратны 4 — иначе фрейм остался бы по width/height без учёта обводки.
+ * Если задан originalRenderBounds — опорный bbox сразу после wrap; иначе читается с обёртки.
  */
 function applyPaddingToWrapperFrame(
   wrapper: FrameNode,
@@ -152,9 +153,6 @@ function applyPaddingToWrapperFrame(
     renderBounds.height
   );
   logJSON("[mo4] applyPadding: analysis", analysis);
-  if (analysis.ok) {
-    return false;
-  }
 
   // Считаем паддинг от фактической (float) разницы target − renderBounds,
   // а размер обёртки берём ровно target — чтобы фрейм был кратен 4 без хвостов.
@@ -228,6 +226,7 @@ function applyPaddingToWrapperFrame(
     })),
   });
 
+  // Успех: подгонка под render bounds и/или паддинг до кратности 4 (в т.ч. при analysis.ok).
   return true;
 }
 

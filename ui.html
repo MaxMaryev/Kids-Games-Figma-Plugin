@@ -839,7 +839,7 @@
               (text ? " " : "") +
               "Пропущено: " +
               msg.skipped +
-              " (уже кратны 4 или нет данных).";
+              " (нет absoluteRenderBounds или нельзя подогнать родителя).";
           }
           if (msg.errors && msg.errors.length) {
             text += (text ? "\n" : "") + msg.errors.join("\n");
