@@ -343,9 +343,70 @@
         background: var(--figma-color-bg-secondary);
         font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;
       }
+
+      /* Баннер обновления */
+      .update-banner {
+        display: none;
+        margin: 0 0 12px;
+        padding: 10px 10px 10px 12px;
+        border-radius: var(--radius-md);
+        border: 1px solid var(--figma-color-border);
+        background: var(--figma-color-bg-secondary);
+        font-size: 11px;
+        line-height: 1.5;
+        color: var(--figma-color-text);
+      }
+      .update-banner.is-visible {
+        display: block;
+      }
+      .update-banner p {
+        margin: 0 0 8px;
+      }
+      .update-banner code {
+        font-size: 10.5px;
+        padding: 1px 5px;
+        border-radius: 4px;
+        background: var(--figma-color-bg);
+        font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;
+      }
+      .update-banner-actions {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 2px;
+      }
+      .update-banner-actions button.linkish {
+        margin: 0;
+        padding: 4px 8px;
+        border: none;
+        background: transparent;
+        color: var(--figma-color-text-secondary);
+        cursor: pointer;
+        font: inherit;
+        font-size: 11px;
+        font-weight: 500;
+        border-radius: 4px;
+      }
+      .update-banner-actions button.linkish:hover {
+        background: var(--figma-color-bg-hover);
+        color: var(--figma-color-text);
+      }
     </style>
   </head>
   <body>
+    <div
+      id="updateBanner"
+      class="update-banner"
+      role="status"
+      aria-live="polite"
+    >
+      <p id="updateBannerBody"></p>
+      <div class="update-banner-actions">
+        <button type="button" class="linkish" id="updateBannerDismiss">Скрыть</button>
+      </div>
+    </div>
+
     <div class="tabs" role="tablist" aria-label="Разделы плагина">
       <button
         type="button"
@@ -521,6 +582,97 @@
         parent.postMessage({ pluginMessage: message }, "*");
       }
 
+      const REMOTE_PACKAGE_JSON =
+        "https://raw.githubusercontent.com/MaxMaryev/Kids-Games-Figma-Plugin/main/package.json";
+
+      const updateBannerEl = document.getElementById("updateBanner");
+      const updateBannerBodyEl = document.getElementById("updateBannerBody");
+      const updateBannerDismissEl = document.getElementById("updateBannerDismiss");
+
+      let pluginCurrentVersion = "";
+      let dismissedRemoteVersion = null;
+      let pendingUpdateRemoteVersion = "";
+
+      function parseSemverCore(version) {
+        const match = /^(\d+)\.(\d+)\.(\d+)/.exec(String(version).trim());
+        if (!match) {
+          return null;
+        }
+        return {
+          major: parseInt(match[1], 10),
+          minor: parseInt(match[2], 10),
+          patch: parseInt(match[3], 10),
+        };
+      }
+
+      function isRemoteVersionNewer(currentVersion, remoteVersion) {
+        const current = parseSemverCore(currentVersion);
+        const remote = parseSemverCore(remoteVersion);
+        if (!current || !remote) {
+          return false;
+        }
+        if (remote.major !== current.major) {
+          return remote.major > current.major;
+        }
+        if (remote.minor !== current.minor) {
+          return remote.minor > current.minor;
+        }
+        return remote.patch > current.patch;
+      }
+
+      function isSafeSemverDisplay(value) {
+        return /^\d+\.\d+\.\d+([+a-zA-Z0-9.-]*)?$/.test(String(value).trim());
+      }
+
+      async function runUpdateCheck() {
+        if (!pluginCurrentVersion) {
+          return;
+        }
+        let remoteVersion = "";
+        try {
+          const response = await fetch(REMOTE_PACKAGE_JSON, { method: "GET" });
+          if (!response.ok) {
+            return;
+          }
+          const data = await response.json();
+          if (!data || typeof data.version !== "string") {
+            return;
+          }
+          remoteVersion = data.version.trim();
+        } catch {
+          return;
+        }
+        if (!remoteVersion || !isSafeSemverDisplay(remoteVersion)) {
+          return;
+        }
+        if (!isRemoteVersionNewer(pluginCurrentVersion, remoteVersion)) {
+          return;
+        }
+        if (dismissedRemoteVersion === remoteVersion) {
+          return;
+        }
+        pendingUpdateRemoteVersion = remoteVersion;
+        updateBannerBodyEl.innerHTML =
+          "Доступна новая версия плагина <strong>" +
+          remoteVersion +
+          "</strong> (у вас " +
+          pluginCurrentVersion +
+          '). Закройте плагин в Figma, откройте <strong>папку с клоном репозитория</strong> и запустите <code>UPDATE.bat</code> — выполнится <code>git pull</code>, <code>npm install</code> и <code>npm run build</code>. Нужен установленный Git и клон с GitHub, не только архив без .git.';
+        updateBannerEl.classList.add("is-visible");
+      }
+
+      updateBannerDismissEl.addEventListener("click", () => {
+        if (pendingUpdateRemoteVersion) {
+          postToPlugin({
+            type: "setUpdateBannerDismissed",
+            remoteVersion: pendingUpdateRemoteVersion,
+          });
+        }
+        updateBannerEl.classList.remove("is-visible");
+        updateBannerBodyEl.textContent = "";
+        pendingUpdateRemoteVersion = "";
+      });
+
       function setMo4Busy(busy, label) {
         mo4CheckEl.disabled = busy;
         mo4FixEl.disabled = busy;
@@ -620,6 +772,21 @@
         if (!msg || !msg.type) {
           return;
         }
+        if (msg.type === "pluginVersion") {
+          pluginCurrentVersion =
+            typeof msg.version === "string" ? msg.version : "";
+          postToPlugin({ type: "getUpdateBannerDismissed" });
+          return;
+        }
+        if (msg.type === "updateBannerDismissed") {
+          dismissedRemoteVersion =
+            msg.dismissedRemoteVersion === null ||
+            msg.dismissedRemoteVersion === undefined
+              ? null
+              : String(msg.dismissedRemoteVersion);
+          runUpdateCheck();
+          return;
+        }
         if (msg.type === "done") {
           goRasterEl.disabled = false;
           if (msg.ok) {
@@ -683,6 +850,8 @@
           mo4StatusEl.textContent = text;
         }
       };
+
+      postToPlugin({ type: "requestPluginVersion" });
     </script>
   </body>
 </html>

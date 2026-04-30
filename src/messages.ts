@@ -24,12 +24,28 @@ export type SelectNodesMessage = {
   nodeIds: string[];
 };
 
+export type RequestPluginVersionMessage = {
+  type: "requestPluginVersion";
+};
+
+export type GetUpdateBannerDismissedMessage = {
+  type: "getUpdateBannerDismissed";
+};
+
+export type SetUpdateBannerDismissedMessage = {
+  type: "setUpdateBannerDismissed";
+  remoteVersion: string;
+};
+
 export type PluginMessageFromUi =
   | RasterizeMessage
   | MultipleOfFourCheckMessage
   | MultipleOfFourFixMessage
   | FocusNodeMessage
-  | SelectNodesMessage;
+  | SelectNodesMessage
+  | RequestPluginVersionMessage
+  | GetUpdateBannerDismissedMessage
+  | SetUpdateBannerDismissedMessage;
 
 export type DoneMessage = {
   type: "done";
@@ -68,10 +84,22 @@ export type MultipleOfFourFixResultMessage = {
   errors: string[];
 };
 
+export type PluginVersionMessage = {
+  type: "pluginVersion";
+  version: string;
+};
+
+export type UpdateBannerDismissedMessage = {
+  type: "updateBannerDismissed";
+  dismissedRemoteVersion: string | null;
+};
+
 export type PluginMessageToUi =
   | DoneMessage
   | MultipleOfFourCheckResultMessage
-  | MultipleOfFourFixResultMessage;
+  | MultipleOfFourFixResultMessage
+  | PluginVersionMessage
+  | UpdateBannerDismissedMessage;
 
 export function isPluginMessageFromUi(raw: unknown): raw is PluginMessageFromUi {
   if (!raw || typeof raw !== "object" || !("type" in raw)) {
@@ -83,6 +111,9 @@ export function isPluginMessageFromUi(raw: unknown): raw is PluginMessageFromUi 
     type === "multipleOfFourCheck" ||
     type === "multipleOfFourFix" ||
     type === "focusNode" ||
-    type === "selectNodes"
+    type === "selectNodes" ||
+    type === "requestPluginVersion" ||
+    type === "getUpdateBannerDismissed" ||
+    type === "setUpdateBannerDismissed"
   );
 }

@@ -7,12 +7,18 @@ import {
   type MultipleOfFourFixResultMessage,
 } from "./messages";
 
+declare const __PLUGIN_VERSION__: string;
+
+const UPDATE_BANNER_DISMISSED_KEY = "updateBannerDismissedForVersion";
+
 figma.showUI(__html__, {
   width: 320,
-  height: 420,
+  height: 480,
   themeColors: true,
   title: "😊 Kids Games Plugin 😊",
 });
+
+figma.ui.postMessage({ type: "pluginVersion", version: __PLUGIN_VERSION__ });
 
 function focusSceneNodeById(nodeId: string): void {
   const node = figma.getNodeById(nodeId);
@@ -29,6 +35,32 @@ function focusSceneNodeById(nodeId: string): void {
 
 figma.ui.onmessage = async (raw: unknown) => {
   if (!isPluginMessageFromUi(raw)) {
+    return;
+  }
+
+  if (raw.type === "requestPluginVersion") {
+    figma.ui.postMessage({ type: "pluginVersion", version: __PLUGIN_VERSION__ });
+    return;
+  }
+
+  if (raw.type === "getUpdateBannerDismissed") {
+    const stored = await figma.clientStorage.getAsync(UPDATE_BANNER_DISMISSED_KEY);
+    const dismissed =
+      typeof stored === "string" && stored.length > 0 ? stored : null;
+    figma.ui.postMessage({
+      type: "updateBannerDismissed",
+      dismissedRemoteVersion: dismissed,
+    });
+    return;
+  }
+
+  if (raw.type === "setUpdateBannerDismissed") {
+    if (typeof raw.remoteVersion === "string" && raw.remoteVersion.length > 0) {
+      await figma.clientStorage.setAsync(
+        UPDATE_BANNER_DISMISSED_KEY,
+        raw.remoteVersion,
+      );
+    }
     return;
   }
 
