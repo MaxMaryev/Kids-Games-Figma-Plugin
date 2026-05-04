@@ -37,18 +37,60 @@ function getExistingMo4WrapperForNode(node: SceneNode): FrameNode | null {
   return null;
 }
 
-function getParentLocalOrigin(
-  parent: SceneNode | PageNode
-): { x: number; y: number } | null {
-  if ("absoluteTransform" in parent) {
-    const t = parent.absoluteTransform;
-    return { x: t[0][2], y: t[1][2] };
+/**
+ * Converts world-space axis-aligned bounding-box dimensions to the local dimensions
+ * needed by resizeWithoutConstraints so that the node's world AABB equals (worldWidth × worldHeight).
+ * Handles parent rotation and non-uniform scale; assumes no shear.
+ */
+function worldDimsToLocalDims(
+  parentTransform: Transform | null,
+  worldWidth: number,
+  worldHeight: number
+): { width: number; height: number } {
+  if (!parentTransform) return { width: worldWidth, height: worldHeight };
+
+  const [[a, b], [c, d]] = parentTransform;
+  const sx = Math.sqrt(a * a + c * c); // scale along local x-axis
+  const sy = Math.sqrt(b * b + d * d); // scale along local y-axis
+
+  if (sx < 1e-10 || sy < 1e-10) return { width: worldWidth, height: worldHeight };
+
+  const cosT = Math.abs(a / sx); // |cos θ|
+  const sinT = Math.abs(c / sx); // |sin θ|
+  const cos2T = cosT * cosT - sinT * sinT; // cos(2θ)
+
+  if (Math.abs(cos2T) < 1e-6) {
+    // Near 45° / 135° — system is indeterminate; swap heuristic
+    return { width: worldHeight / sy, height: worldWidth / sx };
   }
-  // PageNode: children are positioned in page-absolute coords (origin 0,0).
-  if (parent.type === "PAGE") {
-    return { x: 0, y: 0 };
+
+  return {
+    width: Math.abs((cosT * worldWidth - sinT * worldHeight) / (sx * cos2T)),
+    height: Math.abs((cosT * worldHeight - sinT * worldWidth) / (sy * cos2T)),
+  };
+}
+
+/**
+ * Converts a world-space point to the local coordinate space of a parent node,
+ * correctly handling rotation and scale via the inverse of absoluteTransform.
+ */
+function worldToLocal(
+  parentTransform: Transform,
+  worldX: number,
+  worldY: number
+): { x: number; y: number } {
+  const [[a, b, tx], [c, d, ty]] = parentTransform;
+  const det = a * d - b * c;
+  if (Math.abs(det) < 1e-10) {
+    // Degenerate transform (collapsed node), fall back to translation only.
+    return { x: worldX - tx, y: worldY - ty };
   }
-  return null;
+  const dx = worldX - tx;
+  const dy = worldY - ty;
+  return {
+    x: (d * dx - b * dy) / det,
+    y: (a * dy - c * dx) / det,
+  };
 }
 
 function copyLayoutSlotFromNodeToWrapper(
@@ -172,7 +214,16 @@ function applyPaddingToWrapperFrame(
     return false;
   }
   const outerScene = outer as SceneNode | PageNode;
-  const parentOrigin = getParentLocalOrigin(outerScene);
+
+  // absoluteTransform is available on all SceneNodes; PAGE children live in world space.
+  const parentTransform: Transform | null =
+    "absoluteTransform" in outerScene ? outerScene.absoluteTransform : null;
+  // parentOrigin is the translation part only — kept for logging.
+  const parentOrigin = parentTransform
+    ? { x: parentTransform[0][2], y: parentTransform[1][2] }
+    : outerScene.type === "PAGE"
+      ? { x: 0, y: 0 }
+      : null;
   if (!parentOrigin) {
     return false;
   }
@@ -199,13 +250,32 @@ function applyPaddingToWrapperFrame(
     childSnap: childSnap.map((c) => ({ name: c.node.name, x: c.x, y: c.y })),
   });
 
-  wrapper.resizeWithoutConstraints(
+  const localDims = worldDimsToLocalDims(
+    parentTransform,
     expandedDocumentRect.width,
     expandedDocumentRect.height
   );
+  wrapper.resizeWithoutConstraints(localDims.width, localDims.height);
   if (!parentHasAutoLayout(outerScene)) {
-    wrapper.x = expandedDocumentRect.x - parentOrigin.x;
-    wrapper.y = expandedDocumentRect.y - parentOrigin.y;
+    // worldToLocal maps a world point to the frame's local *origin*. But the frame's
+    // axis-aligned bounding box (AABB) top-left is generally not the same as its origin
+    // when the parent has rotation. We compute the offset from origin→AABB-top-left and
+    // subtract it so the AABB aligns with expandedDocumentRect.
+    let targetWorldX = expandedDocumentRect.x;
+    let targetWorldY = expandedDocumentRect.y;
+    if (parentTransform) {
+      const [[a, b], [c, d]] = parentTransform;
+      const lw = localDims.width;
+      const lh = localDims.height;
+      // Minimum x/y offsets of the four rotated corners relative to the origin.
+      targetWorldX -= Math.min(0, a * lw, b * lh, a * lw + b * lh);
+      targetWorldY -= Math.min(0, c * lw, d * lh, c * lw + d * lh);
+    }
+    const localPos = parentTransform
+      ? worldToLocal(parentTransform, targetWorldX, targetWorldY)
+      : { x: targetWorldX, y: targetWorldY }; // PAGE: world === local
+    wrapper.x = localPos.x;
+    wrapper.y = localPos.y;
   }
   const dx = wrapper.x - oldWrapperX;
   const dy = wrapper.y - oldWrapperY;
