@@ -47,7 +47,7 @@ export async function runRasterize(
       });
       const image = figma.createImage(bytes);
       const raster = figma.createRectangle();
-      raster.name = `${node.name} PNG`;
+      raster.name = node.name;
       raster.fills = [
         {
           type: "IMAGE",
