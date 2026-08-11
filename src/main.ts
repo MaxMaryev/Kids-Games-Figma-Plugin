@@ -52,6 +52,22 @@ async function loadPresetTree(): Promise<LayerNamePreset[]> {
   return presetTree;
 }
 
+/**
+ * История правок дерева — снимки «как было» перед каждой мутацией.
+ * Живёт только в памяти: спасает от только что сделанной ошибки, а не заменяет
+ * систему версий. Удаление ветки уносит поддерево, и без этого вернуть его
+ * можно было бы только «Сбросить», потеряв заодно все остальные правки.
+ */
+const presetTreeHistory: LayerNamePreset[][] = [];
+const PRESET_HISTORY_LIMIT = 10;
+
+function pushPresetHistory(tree: LayerNamePreset[]): void {
+  presetTreeHistory.push(tree);
+  if (presetTreeHistory.length > PRESET_HISTORY_LIMIT) {
+    presetTreeHistory.shift();
+  }
+}
+
 async function savePresetTree(tree: LayerNamePreset[]): Promise<void> {
   presetTree = tree;
   presetTreeLoaded = true;
@@ -66,7 +82,33 @@ function postPresetTreeToUi(notice?: string): void {
     type: "layerNamePresets",
     presets: presetTree,
     notice,
+    canUndo: presetTreeHistory.length > 0,
+    customIds: collectCustomIds(presetTree),
   });
+}
+
+/** Узлы, добавленные или переименованные относительно стандартного набора. */
+function collectCustomIds(tree: LayerNamePreset[]): string[] {
+  const standard: { [id: string]: string } = {};
+  const collect = (nodes: LayerNamePreset[]): void => {
+    for (const node of nodes) {
+      standard[node.id] = node.template;
+      if (node.children) collect(node.children);
+    }
+  };
+  collect(defaultPresetTree());
+
+  const ids: string[] = [];
+  const walk = (nodes: LayerNamePreset[]): void => {
+    for (const node of nodes) {
+      if (standard[node.id] !== node.template) {
+        ids.push(node.id);
+      }
+      if (node.children) walk(node.children);
+    }
+  };
+  walk(tree);
+  return ids;
 }
 
 function postSelectionToUi(): void {
@@ -262,6 +304,7 @@ figma.ui.onmessage = async (raw: unknown) => {
       postPresetTreeToUi("Тип не найден — список обновлён.");
       return;
     }
+    pushPresetHistory(tree);
     await savePresetTree(result.tree);
     if (previousTemplate.length > 0) {
       await rewriteRecentTemplate(previousTemplate, raw.template.trim());
@@ -281,6 +324,7 @@ figma.ui.onmessage = async (raw: unknown) => {
       postPresetTreeToUi("Пустое имя — тип не добавлен.");
       return;
     }
+    pushPresetHistory(tree);
     await savePresetTree(result.tree);
     postPresetTreeToUi(`Добавлено: ${raw.template.trim()}`);
     return;
@@ -293,6 +337,7 @@ figma.ui.onmessage = async (raw: unknown) => {
       postPresetTreeToUi("Тип не найден — список обновлён.");
       return;
     }
+    pushPresetHistory(tree);
     await savePresetTree(result.tree);
     postPresetTreeToUi(`Удалено типов: ${result.removed}.`);
     return;
@@ -300,15 +345,30 @@ figma.ui.onmessage = async (raw: unknown) => {
 
   if (raw.type === "movePreset") {
     const tree = await loadPresetTree();
+    pushPresetHistory(tree);
     await savePresetTree(movePreset(tree, raw.id, raw.direction));
     postPresetTreeToUi();
     return;
   }
 
   if (raw.type === "resetPresets") {
+    const previous = await loadPresetTree();
     const tree = defaultPresetTree();
+    pushPresetHistory(previous);
     await savePresetTree(tree);
     postPresetTreeToUi(`Список сброшен к стандартному (${countPresets(tree)}).`);
+    return;
+  }
+
+  if (raw.type === "undoPresetEdit") {
+    await loadPresetTree();
+    const previous = presetTreeHistory.pop();
+    if (!previous) {
+      postPresetTreeToUi();
+      return;
+    }
+    await savePresetTree(previous);
+    postPresetTreeToUi("Отменено.");
     return;
   }
 

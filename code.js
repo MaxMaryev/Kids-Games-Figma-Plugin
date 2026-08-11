@@ -1000,7 +1000,7 @@ function isPluginMessageFromUi(raw) {
     return false;
   }
   const type = raw.type;
-  return type === "rasterize" || type === "multipleOfFourCheck" || type === "multipleOfFourFix" || type === "renameLayers" || type === "getRecentNamePresets" || type === "setRecentNamePresets" || type === "renamePreset" || type === "addPreset" || type === "removePreset" || type === "movePreset" || type === "resetPresets" || type === "focusNode" || type === "selectNodes" || type === "requestPluginVersion" || type === "getUpdateBannerDismissed" || type === "setUpdateBannerDismissed";
+  return type === "rasterize" || type === "multipleOfFourCheck" || type === "multipleOfFourFix" || type === "renameLayers" || type === "getRecentNamePresets" || type === "setRecentNamePresets" || type === "renamePreset" || type === "addPreset" || type === "removePreset" || type === "movePreset" || type === "resetPresets" || type === "undoPresetEdit" || type === "focusNode" || type === "selectNodes" || type === "requestPluginVersion" || type === "getUpdateBannerDismissed" || type === "setUpdateBannerDismissed";
 }
 
 // src/main.ts
@@ -1313,6 +1313,9 @@ figma.showUI(`<!DOCTYPE html>\r
       }\r
 \r
       /* \u0412\u043A\u043B\u0430\u0434\u043A\u0430 \xAB\u0420\u0435\u043D\u0435\u0439\u043C\u0438\u043D\u0433\xBB: \u043F\u043E\u0438\u0441\u043A, \u043D\u0435\u0434\u0430\u0432\u043D\u0438\u0435, \u0434\u0435\u0440\u0435\u0432\u043E \u043F\u0440\u0435\u0441\u0435\u0442\u043E\u0432 */\r
+      .search-input.names-search-first {\r
+        margin-top: 0;\r
+      }\r
       .search-input {\r
         width: 100%;\r
         margin-top: 10px;\r
@@ -1385,7 +1388,7 @@ figma.showUI(`<!DOCTYPE html>\r
         color: var(--accent);\r
       }\r
       .tree-body {\r
-        max-height: 216px;\r
+        max-height: 270px;\r
         padding: 4px 0;\r
         overflow-y: auto;\r
         background: var(--figma-color-bg);\r
@@ -1395,32 +1398,45 @@ figma.showUI(`<!DOCTYPE html>\r
         align-items: center;\r
         gap: 2px;\r
         padding-right: 6px;\r
-        padding-left: calc(4px + var(--depth) * 14px);\r
+        padding-left: calc(4px + var(--depth) * 12px);\r
+        /* \u041D\u0430\u043F\u0440\u0430\u0432\u043B\u044F\u044E\u0449\u0438\u0435 \u0432\u043B\u043E\u0436\u0435\u043D\u043D\u043E\u0441\u0442\u0438: \u043F\u043E 1px \u043B\u0438\u043D\u0438\u0438 \u043D\u0430 \u043A\u0430\u0436\u0434\u044B\u0439 \u0443\u0440\u043E\u0432\u0435\u043D\u044C \u043E\u0442\u0441\u0442\u0443\u043F\u0430. */\r
+        background-image: repeating-linear-gradient(\r
+          to right,\r
+          var(--figma-color-border) 0 1px,\r
+          transparent 1px 12px\r
+        );\r
+        background-repeat: no-repeat;\r
+        background-position: 11px 0;\r
+        background-size: calc(var(--depth) * 12px) 100%;\r
+        transition: background-color 0.12s ease;\r
+      }\r
+      .tree-row:hover,\r
+      .tree-row:focus-within {\r
+        background-color: var(--figma-color-bg-hover);\r
       }\r
       .tree-toggle {\r
-        flex: 0 0 18px;\r
-        width: 18px;\r
-        height: 22px;\r
+        flex: 0 0 20px;\r
+        width: 20px;\r
+        height: 26px;\r
         margin: 0;\r
         padding: 0;\r
+        display: flex;\r
+        align-items: center;\r
+        justify-content: center;\r
         border: none;\r
         border-radius: 4px;\r
         background: transparent;\r
         color: var(--figma-color-text-secondary);\r
         cursor: pointer;\r
         font: inherit;\r
-        line-height: 22px;\r
       }\r
-      .tree-toggle::before {\r
-        content: "\u203A";\r
-        display: block;\r
+      .tree-toggle svg {\r
         transition: transform 0.12s ease;\r
       }\r
-      .tree-toggle[aria-expanded="true"]::before {\r
+      .tree-toggle[aria-expanded="true"] svg {\r
         transform: rotate(90deg);\r
       }\r
       .tree-toggle:hover {\r
-        background: var(--figma-color-bg-hover);\r
         color: var(--figma-color-text);\r
       }\r
       .tree-toggle.is-leaf {\r
@@ -1431,7 +1447,7 @@ figma.showUI(`<!DOCTYPE html>\r
         flex: 1;\r
         min-width: 0;\r
         margin: 0;\r
-        padding: 4px 7px;\r
+        padding: 5px 7px;\r
         border: none;\r
         border-radius: 5px;\r
         background: transparent;\r
@@ -1443,7 +1459,6 @@ figma.showUI(`<!DOCTYPE html>\r
         white-space: nowrap;\r
         overflow: hidden;\r
         text-overflow: ellipsis;\r
-        transition: background 0.12s ease;\r
       }\r
       .tree-apply.is-group {\r
         font-weight: 600;\r
@@ -1451,14 +1466,20 @@ figma.showUI(`<!DOCTYPE html>\r
       .tree-apply.is-leaf {\r
         color: var(--figma-color-text-secondary);\r
       }\r
-      .tree-apply:hover,\r
       .tree-apply:focus-visible {\r
         outline: none;\r
-        background: var(--accent-soft);\r
-        color: var(--figma-color-text);\r
+        box-shadow: inset 0 0 0 1px var(--accent);\r
       }\r
-      .tree.is-idle .tree-apply {\r
-        opacity: 0.55;\r
+      /* \u0421\u0432\u043E\u0439 \u0442\u0438\u043F: \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D \u0438\u043B\u0438 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u043D \u043E\u0442\u043D\u043E\u0441\u0438\u0442\u0435\u043B\u044C\u043D\u043E \u0441\u0442\u0430\u043D\u0434\u0430\u0440\u0442\u043D\u043E\u0433\u043E \u043D\u0430\u0431\u043E\u0440\u0430. */\r
+      .tree-apply.is-custom::after {\r
+        content: "";\r
+        display: inline-block;\r
+        width: 4px;\r
+        height: 4px;\r
+        margin-left: 6px;\r
+        border-radius: 50%;\r
+        vertical-align: middle;\r
+        background: var(--accent);\r
       }\r
       .tree-empty {\r
         padding: 16px 10px;\r
@@ -1492,28 +1513,40 @@ figma.showUI(`<!DOCTYPE html>\r
         display: none;\r
         flex: 0 0 auto;\r
         gap: 1px;\r
+        /* \u041F\u0440\u0438\u0433\u043B\u0443\u0448\u0435\u043D\u044B, \u043F\u043E\u043A\u0430 \u0441\u0442\u0440\u043E\u043A\u0430 \u043D\u0435 \u043F\u043E\u0434 \u043A\u0443\u0440\u0441\u043E\u0440\u043E\u043C: 71 \u0441\u0442\u0440\u043E\u043A\u0430 \u0438\u043D\u0430\u0447\u0435 \u0440\u044F\u0431\u0438\u0442. */\r
+        opacity: 0.4;\r
+        transition: opacity 0.12s ease;\r
       }\r
       .tree.is-editing .tree-actions {\r
         display: flex;\r
       }\r
+      .tree-row:hover .tree-actions,\r
+      .tree-row:focus-within .tree-actions {\r
+        opacity: 1;\r
+      }\r
       .icon-btn {\r
-        width: 20px;\r
-        height: 20px;\r
+        display: flex;\r
+        align-items: center;\r
+        justify-content: center;\r
+        width: 24px;\r
+        height: 24px;\r
         margin: 0;\r
         padding: 0;\r
         border: none;\r
-        border-radius: 4px;\r
+        border-radius: 5px;\r
         background: transparent;\r
         color: var(--figma-color-text-secondary);\r
         cursor: pointer;\r
         font: inherit;\r
-        font-size: 12px;\r
-        line-height: 20px;\r
-        text-align: center;\r
         transition: background 0.12s ease, color 0.12s ease;\r
       }\r
       .icon-btn:hover {\r
-        background: var(--figma-color-bg-hover);\r
+        background: var(--figma-color-bg-secondary);\r
+        color: var(--figma-color-text);\r
+      }\r
+      .icon-btn:focus-visible {\r
+        outline: none;\r
+        box-shadow: 0 0 0 2px var(--accent-soft);\r
         color: var(--figma-color-text);\r
       }\r
       .icon-btn.is-danger:hover {\r
@@ -1567,11 +1600,14 @@ figma.showUI(`<!DOCTYPE html>\r
         box-shadow: 0 0 0 3px var(--accent-soft);\r
       }\r
 \r
+      /* \u041F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440 \u2014 \u0440\u0430\u043C\u043A\u0430 \u0431\u0435\u0437 \u0437\u0430\u043B\u0438\u0432\u043A\u0438, \u0441\u0442\u0430\u0442\u0443\u0441 \u2014 \u0437\u0430\u043B\u0438\u0432\u043A\u0430. \u0420\u0430\u043D\u044C\u0448\u0435 \u0443 \u043E\u0431\u043E\u0438\u0445 \u0431\u044B\u043B\r
+         \u043E\u0434\u0438\u043D\u0430\u043A\u043E\u0432\u044B\u0439 \u0444\u043E\u043D, \u0438 \u043E\u043D\u0438 \u0447\u0438\u0442\u0430\u043B\u0438\u0441\u044C \u043A\u0430\u043A \u043E\u0434\u043D\u0430 \u0441\u0435\u0440\u0430\u044F \u043F\u043B\u0438\u0442\u0430. */\r
       .preview {\r
         margin-top: 8px;\r
-        padding: 7px 10px;\r
+        padding: 6px 10px;\r
+        border: 1px solid var(--figma-color-border);\r
         border-radius: var(--radius-sm);\r
-        background: var(--figma-color-bg-secondary);\r
+        background: transparent;\r
         color: var(--figma-color-text-secondary);\r
         font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;\r
         font-size: 10.5px;\r
@@ -1582,7 +1618,48 @@ figma.showUI(`<!DOCTYPE html>\r
         text-overflow: ellipsis;\r
       }\r
       .preview.is-active {\r
+        border-color: var(--accent);\r
+        background: var(--accent-soft);\r
         color: var(--figma-color-text);\r
+      }\r
+\r
+      /* \u0421\u0442\u0440\u043E\u043A\u0430 \u0441\u0442\u0430\u0442\u0443\u0441\u0430 \u0441 \u0441\u0441\u044B\u043B\u043A\u043E\u0439 \xAB\u041E\u0442\u043C\u0435\u043D\u0438\u0442\u044C\xBB \u0441\u043F\u0440\u0430\u0432\u0430. */\r
+      .status-row {\r
+        display: flex;\r
+        align-items: flex-start;\r
+        gap: 8px;\r
+        margin-top: 10px;\r
+        min-height: 34px;\r
+      }\r
+      .status-row .status {\r
+        flex: 1;\r
+        min-width: 0;\r
+        margin-top: 0;\r
+      }\r
+      .status-row .status:empty {\r
+        display: block;\r
+        background: transparent;\r
+      }\r
+      #namesUndo {\r
+        display: none;\r
+        flex: 0 0 auto;\r
+        margin: 0;\r
+        padding: 8px 10px;\r
+        border: 1px solid var(--figma-color-border);\r
+        border-radius: var(--radius-sm);\r
+        background: var(--figma-color-bg);\r
+        color: var(--accent);\r
+        cursor: pointer;\r
+        font: inherit;\r
+        font-size: 11px;\r
+        font-weight: 500;\r
+      }\r
+      #namesUndo.is-visible {\r
+        display: block;\r
+      }\r
+      #namesUndo:hover {\r
+        background: var(--accent-soft);\r
+        border-color: var(--accent);\r
       }\r
 \r
       /* \xAB\u041A\u0430\u043A \u044D\u0442\u043E \u0440\u0430\u0431\u043E\u0442\u0430\u0435\u0442\xBB */\r
@@ -1823,14 +1900,11 @@ figma.showUI(`<!DOCTYPE html>\r
     </div>\r
 \r
     <div id="panelNames" class="panel" role="tabpanel" aria-labelledby="tabNames">\r
-      <p class="hint">\r
-        \u0412\u044B\u0434\u0435\u043B\u0438\u0442\u0435 \u0441\u043B\u043E\u0438 \u0438 \u043D\u0430\u0436\u043C\u0438\u0442\u0435 \u0442\u0438\u043F \u2014 \u043F\u043B\u0430\u0433\u0438\u043D \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u0443\u0435\u0442 \u0438\u0445 \u0441\u0432\u0435\u0440\u0445\u0443 \u0432\u043D\u0438\u0437, \u043A\u0430\u043A\r
-        \u0432 \u043F\u0430\u043D\u0435\u043B\u0438 Layers. \u041D\u0443\u043C\u0435\u0440\u0430\u0446\u0438\u044F \u0432\u0441\u0435\u0433\u0434\u0430 \u0441 <code>01</code>.\r
-      </p>\r
-\r
+      <!-- \u041E\u0442\u0434\u0435\u043B\u044C\u043D\u043E\u0439 \u043F\u043E\u0434\u0441\u043A\u0430\u0437\u043A\u0438 \u043D\u0435\u0442: \u043F\u043E\u043B\u043E\u0441\u0430 \u043F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440\u0430 \u043D\u0430\u0434 \u0441\u0442\u0430\u0442\u0443\u0441\u043E\u043C \u0433\u043E\u0432\u043E\u0440\u0438\u0442\r
+           \u0442\u043E \u0436\u0435 \u0441\u0430\u043C\u043E\u0435 \u0438 \u0432\u0441\u0435\u0433\u0434\u0430 \u0430\u043A\u0442\u0443\u0430\u043B\u044C\u043D\u044B\u043C \u0447\u0438\u0441\u043B\u043E\u043C \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u043D\u044B\u0445 \u0441\u043B\u043E\u0451\u0432. -->\r
       <input\r
         type="search"\r
-        class="search-input"\r
+        class="search-input names-search-first"\r
         id="namesSearch"\r
         placeholder="\u041F\u043E\u0438\u0441\u043A \u043F\u043E \u0442\u0438\u043F\u0430\u043C \u2014 Eyes, Hair, Dress\u2026"\r
         aria-label="\u041F\u043E\u0438\u0441\u043A \u043F\u043E \u0442\u0438\u043F\u0430\u043C"\r
@@ -1846,7 +1920,6 @@ figma.showUI(`<!DOCTYPE html>\r
         <div class="list-header">\r
           <span>\u0422\u0438\u043F\u044B \u0441\u043B\u043E\u0451\u0432</span>\r
           <span class="tree-header-right">\r
-            <span class="tree-count" id="namesSelectionCount">\u0412\u044B\u0434\u0435\u043B\u0435\u043D\u043E: 0</span>\r
             <button\r
               type="button"\r
               class="linkish"\r
@@ -1866,7 +1939,10 @@ figma.showUI(`<!DOCTYPE html>\r
       </div>\r
 \r
       <div class="preview" id="namesPreview" aria-live="polite"></div>\r
-      <div class="status" id="namesStatus" role="status"></div>\r
+      <div class="status-row">\r
+        <div class="status" id="namesStatus" role="status"></div>\r
+        <button type="button" id="namesUndo">\u041E\u0442\u043C\u0435\u043D\u0438\u0442\u044C</button>\r
+      </div>\r
 \r
       <details>\r
         <summary>\u041A\u0430\u043A \u044D\u0442\u043E \u0440\u0430\u0431\u043E\u0442\u0430\u0435\u0442</summary>\r
@@ -2147,8 +2223,8 @@ figma.showUI(`<!DOCTYPE html>\r
       const namesRecentChipsEl = document.getElementById("namesRecentChips");\r
       const namesTreeEl = document.getElementById("namesTree");\r
       const namesTreeBodyEl = document.getElementById("namesTreeBody");\r
-      const namesSelectionCountEl = document.getElementById("namesSelectionCount");\r
       const namesPreviewEl = document.getElementById("namesPreview");\r
+      const namesUndoEl = document.getElementById("namesUndo");\r
       const namesEditToggleEl = document.getElementById("namesEditToggle");\r
       const namesEditBarEl = document.getElementById("namesEditBar");\r
       const namesAddRootEl = document.getElementById("namesAddRoot");\r
@@ -2156,15 +2232,45 @@ figma.showUI(`<!DOCTYPE html>\r
       const namesEditHintEl = document.getElementById("namesEditHint");\r
 \r
       const RECENT_LIMIT = 5;\r
-      const PREVIEW_IDLE = "\u041D\u0430\u0432\u0435\u0434\u0438\u0442\u0435 \u043D\u0430 \u0442\u0438\u043F \u2014 \u043F\u043E\u043A\u0430\u0436\u0443 \u0431\u0443\u0434\u0443\u0449\u0438\u0435 \u0438\u043C\u0435\u043D\u0430.";\r
       const PREVIEW_EDIT =\r
         "\u041F\u0440\u0430\u0432\u043A\u0430 \u0441\u043F\u0438\u0441\u043A\u0430: \u043A\u043B\u0438\u043A \u043F\u043E \u0441\u0442\u0440\u043E\u043A\u0435 \u2014 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u0442\u044C, + \u2014 \u0432\u043B\u043E\u0436\u0435\u043D\u043D\u044B\u0439 \u0442\u0438\u043F.";\r
+\r
+      /* \u0418\u043D\u043B\u0430\u0439\u043D\u043E\u0432\u044B\u0435 \u0438\u043A\u043E\u043D\u043A\u0438: \u0442\u0435\u043A\u0441\u0442\u043E\u0432\u044B\u0435 \u0433\u043B\u0438\u0444\u044B \xAB+ \u2191 \u2193 \xD7\xBB \u0432\u0441\u0442\u0430\u0432\u0430\u043B\u0438 \u043F\u043E-\u0440\u0430\u0437\u043D\u043E\u043C\u0443\r
+         \u043F\u043E \u0431\u0430\u0437\u043E\u0432\u043E\u0439 \u043B\u0438\u043D\u0438\u0438 \u0438 \u043F\u043B\u043E\u0442\u043D\u043E\u0441\u0442\u0438. */\r
+      const ICON_PATHS = {\r
+        chevron: "M4.5 2.5 L8 6 L4.5 9.5",\r
+        plus: "M6 2.5 V9.5 M2.5 6 H9.5",\r
+        up: "M6 9.5 V2.5 M3 5.5 L6 2.5 L9 5.5",\r
+        down: "M6 2.5 V9.5 M3 6.5 L6 9.5 L9 6.5",\r
+        close: "M3.2 3.2 L8.8 8.8 M8.8 3.2 L3.2 8.8",\r
+      };\r
+\r
+      function createIcon(name) {\r
+        const NS = "http://www.w3.org/2000/svg";\r
+        const svg = document.createElementNS(NS, "svg");\r
+        svg.setAttribute("viewBox", "0 0 12 12");\r
+        svg.setAttribute("width", "12");\r
+        svg.setAttribute("height", "12");\r
+        svg.setAttribute("fill", "none");\r
+        svg.setAttribute("aria-hidden", "true");\r
+        const path = document.createElementNS(NS, "path");\r
+        path.setAttribute("d", ICON_PATHS[name]);\r
+        path.setAttribute("stroke", "currentColor");\r
+        path.setAttribute("stroke-width", "1.5");\r
+        path.setAttribute("stroke-linecap", "round");\r
+        path.setAttribute("stroke-linejoin", "round");\r
+        svg.appendChild(path);\r
+        return svg;\r
+      }\r
 \r
       let namePresets = [];\r
       let recentTemplates = [];\r
       let expandedIds = {};\r
+      let customIds = {};\r
       let namesFilter = "";\r
       let selectionCount = 0;\r
+      let hoveredTemplate = "";\r
+      let focusedRowIndex = 0;\r
 \r
       // \u0420\u0435\u0436\u0438\u043C \u043F\u0440\u0430\u0432\u043A\u0438 \u0434\u0435\u0440\u0435\u0432\u0430. \u041E\u0431\u044B\u0447\u043D\u044B\u0439 \u043A\u043B\u0438\u043A \u043F\u043E \u0441\u0442\u0440\u043E\u043A\u0435 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u044B\u0432\u0430\u0435\u0442 \u0441\u043B\u043E\u0438,\r
       // \u043F\u043E\u044D\u0442\u043E\u043C\u0443 \u0440\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u043D\u0438\u0435 \u0436\u0438\u0432\u0451\u0442 \u0432 \u043E\u0442\u0434\u0435\u043B\u044C\u043D\u043E\u043C \u0440\u0435\u0436\u0438\u043C\u0435 \u2014 \u043C\u0435\u043D\u044C\u0448\u0435 \u043F\u0440\u043E\u043C\u0430\u0445\u043E\u0432.\r
@@ -2192,12 +2298,7 @@ figma.showUI(`<!DOCTYPE html>\r
         return segments.join("_");\r
       }\r
 \r
-      function previewLine(template) {\r
-        const count = selectionCount;\r
-        if (count === 0) {\r
-          return "\u041D\u0435\u0442 \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u044F \xB7 \u0431\u0443\u0434\u0435\u0442 " + previewName(template, 0) + ", " +\r
-            previewName(template, 1) + " \u2026";\r
-        }\r
+      function namesForCount(template, count) {\r
         if (count === 1) {\r
           return previewName(template, 0);\r
         }\r
@@ -2213,30 +2314,82 @@ figma.showUI(`<!DOCTYPE html>\r
         );\r
       }\r
 \r
+      /**\r
+       * \u041F\u043E\u043B\u043E\u0441\u0430 \u043F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440\u0430 \u2014 \u0435\u0434\u0438\u043D\u0441\u0442\u0432\u0435\u043D\u043D\u043E\u0435 \u043C\u0435\u0441\u0442\u043E, \u0433\u0434\u0435 \u0432\u0438\u0434\u043D\u043E \u0438 \u0441\u043A\u043E\u043B\u044C\u043A\u043E \u0441\u043B\u043E\u0451\u0432\r
+       * \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u043E, \u0438 \u0447\u0442\u043E \u0441 \u043D\u0438\u043C\u0438 \u0441\u0442\u0430\u043D\u0435\u0442. \u0420\u0430\u043D\u044C\u0448\u0435 \u0441\u0447\u0451\u0442\u0447\u0438\u043A \u0436\u0438\u043B \u0432 \u0448\u0430\u043F\u043A\u0435 \u0434\u0435\u0440\u0435\u0432\u0430,\r
+       * \u0432 235px \u043E\u0442 \u0431\u0443\u0434\u0443\u0449\u0438\u0445 \u0438\u043C\u0451\u043D.\r
+       */\r
       function setPreview(template) {\r
+        hoveredTemplate = template || "";\r
         if (isEditingPresets) {\r
           namesPreviewEl.textContent = PREVIEW_EDIT;\r
           namesPreviewEl.classList.remove("is-active");\r
           return;\r
         }\r
-        if (!template) {\r
-          namesPreviewEl.textContent = PREVIEW_IDLE;\r
+        if (selectionCount === 0) {\r
+          namesPreviewEl.textContent = "\u0412\u044B\u0434\u0435\u043B\u0438\u0442\u0435 \u0441\u043B\u043E\u0438 \u043D\u0430 \u043A\u0430\u043D\u0432\u0430\u0441\u0435";\r
           namesPreviewEl.classList.remove("is-active");\r
           return;\r
         }\r
-        namesPreviewEl.textContent = previewLine(template);\r
+        if (!template) {\r
+          namesPreviewEl.textContent =\r
+            pluralLayers(selectionCount) + " \u2014 \u043D\u0430\u0432\u0435\u0434\u0438\u0442\u0435 \u043D\u0430 \u0442\u0438\u043F";\r
+          namesPreviewEl.classList.remove("is-active");\r
+          return;\r
+        }\r
+        namesPreviewEl.textContent =\r
+          selectionCount + " \u2192 " + namesForCount(template, selectionCount);\r
+        namesPreviewEl.classList.add("is-active");\r
+      }\r
+\r
+      /** \u0427\u0442\u043E \u043F\u0440\u043E\u0438\u0437\u043E\u0439\u0434\u0451\u0442 \u0441 \u0432\u043B\u043E\u0436\u0435\u043D\u043D\u044B\u043C\u0438 \u043F\u0440\u0438 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u043D\u0438\u0438 \u0432\u0435\u0442\u043A\u0438. */\r
+      function setCascadePreview(node, nextTemplate) {\r
+        const template = nextTemplate.trim();\r
+        const affected = [];\r
+        const walk = (nodes) => {\r
+          for (const child of nodes) {\r
+            if (child.template.indexOf(node.template) === 0) {\r
+              affected.push(child);\r
+            }\r
+            walk(child.children || []);\r
+          }\r
+        };\r
+        walk(node.children || []);\r
+\r
+        if (template.length === 0) {\r
+          namesPreviewEl.textContent = "\u041F\u0443\u0441\u0442\u043E\u0435 \u0438\u043C\u044F \u2014 Enter \u043D\u0435 \u0441\u043E\u0445\u0440\u0430\u043D\u0438\u0442";\r
+          namesPreviewEl.classList.remove("is-active");\r
+          return;\r
+        }\r
+        if (template === node.template) {\r
+          namesPreviewEl.textContent =\r
+            affected.length > 0\r
+              ? "\u0412\u043B\u043E\u0436\u0435\u043D\u043D\u044B\u0445 \u043E\u0431\u043D\u043E\u0432\u0438\u0442\u0441\u044F \u0432\u043C\u0435\u0441\u0442\u0435: " + affected.length\r
+              : "\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043D\u043E\u0432\u043E\u0435 \u0438\u043C\u044F   \xB7   Esc \u2014 \u043E\u0442\u043C\u0435\u043D\u0430";\r
+          namesPreviewEl.classList.remove("is-active");\r
+          return;\r
+        }\r
+        if (affected.length === 0) {\r
+          namesPreviewEl.textContent =\r
+            node.template + " \u2192 " + template + "   \xB7   Enter, Esc \u2014 \u043E\u0442\u043C\u0435\u043D\u0430";\r
+          namesPreviewEl.classList.add("is-active");\r
+          return;\r
+        }\r
+        const sample =\r
+          template + affected[0].template.slice(node.template.length);\r
+        namesPreviewEl.textContent =\r
+          affected[0].template +\r
+          " \u2192 " +\r
+          sample +\r
+          (affected.length > 1 ? ", \u0438 \u0435\u0449\u0451 " + (affected.length - 1) : "");\r
         namesPreviewEl.classList.add("is-active");\r
       }\r
 \r
       function setSelectionCount(count) {\r
         selectionCount = count;\r
-        namesSelectionCountEl.textContent = "\u0412\u044B\u0434\u0435\u043B\u0435\u043D\u043E: " + count;\r
-        namesSelectionCountEl.classList.toggle("is-ready", count > 0);\r
-        // \u0412 \u0440\u0435\u0436\u0438\u043C\u0435 \u043F\u0440\u0430\u0432\u043A\u0438 \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u0435 \u043D\u0435 \u043D\u0443\u0436\u043D\u043E \u2014 \u043D\u0435 \u043F\u0440\u0438\u0433\u043B\u0443\u0448\u0430\u0435\u043C \u0434\u0435\u0440\u0435\u0432\u043E.\r
-        namesTreeEl.classList.toggle(\r
-          "is-idle",\r
-          count === 0 && !isEditingPresets\r
-        );\r
+        if (!isEditingPresets) {\r
+          setPreview(hoveredTemplate);\r
+        }\r
       }\r
 \r
       function matchesFilter(node, query) {\r
@@ -2268,12 +2421,13 @@ figma.showUI(`<!DOCTYPE html>\r
         return spacer;\r
       }\r
 \r
-      function createIconButton(glyph, label, onClick, danger) {\r
+      function createIconButton(icon, label, onClick, danger) {\r
         const button = document.createElement("button");\r
         button.type = "button";\r
         button.className = "icon-btn" + (danger ? " is-danger" : "");\r
-        button.textContent = glyph;\r
+        button.appendChild(createIcon(icon));\r
         button.title = label;\r
+        button.tabIndex = -1;\r
         button.setAttribute("aria-label", label);\r
         button.addEventListener("click", (event) => {\r
           event.stopPropagation();\r
@@ -2283,7 +2437,7 @@ figma.showUI(`<!DOCTYPE html>\r
       }\r
 \r
       /** \u0421\u0442\u0440\u043E\u043A\u0430-\u0438\u043D\u043F\u0443\u0442: \u0438\u043D\u043B\u0430\u0439\u043D-\u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u043D\u0438\u0435 \u0438 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u0438\u0435 \u043D\u043E\u0432\u043E\u0433\u043E \u0442\u0438\u043F\u0430. */\r
-      function createInputRow(depth, value, onCommit, onCancel) {\r
+      function createInputRow(depth, value, onCommit, onCancel, onInput) {\r
         const row = createRowShell(depth);\r
         row.appendChild(createSpacer());\r
 \r
@@ -2316,6 +2470,10 @@ figma.showUI(`<!DOCTYPE html>\r
           }\r
         });\r
         input.addEventListener("blur", commit);\r
+        if (onInput) {\r
+          input.addEventListener("input", () => onInput(input.value));\r
+          onInput(input.value);\r
+        }\r
 \r
         row.appendChild(input);\r
         focusAfterRender = input;\r
@@ -2330,9 +2488,11 @@ figma.showUI(`<!DOCTYPE html>\r
         wrap.className = "tree-confirm";\r
         const label = document.createElement("span");\r
         const nested = countPresetNodes(node.children || []);\r
+        // \u0418\u043C\u044F \u043E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u043E: \u0438\u043D\u0430\u0447\u0435 \u043F\u043E\u0441\u043B\u0435 \u0441\u043A\u0440\u043E\u043B\u043B\u0430 \u043D\u0435\u043F\u043E\u043D\u044F\u0442\u043D\u043E, \u0447\u0442\u043E \u0443\u0434\u0430\u043B\u044F\u0435\u0448\u044C.\r
         label.textContent = nested > 0\r
-          ? "\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u0441 \u0432\u043B\u043E\u0436\u0435\u043D\u043D\u044B\u043C\u0438 (" + nested + ")?"\r
-          : "\u0423\u0434\u0430\u043B\u0438\u0442\u044C?";\r
+          ? "\u0423\u0434\u0430\u043B\u0438\u0442\u044C " + node.template + " \u0438 " + nested + " \u0432\u043B\u043E\u0436\u0435\u043D\u043D\u044B\u0445?"\r
+          : "\u0423\u0434\u0430\u043B\u0438\u0442\u044C " + node.template + "?";\r
+        label.title = label.textContent;\r
         wrap.appendChild(label);\r
 \r
         const yes = document.createElement("button");\r
@@ -2362,11 +2522,17 @@ figma.showUI(`<!DOCTYPE html>\r
         const children = node.children || [];\r
         const hasChildren = children.length > 0;\r
         const row = createRowShell(depth);\r
+        row.setAttribute("role", "treeitem");\r
+        row.dataset.id = node.id;\r
+        if (hasChildren) {\r
+          row.setAttribute("aria-expanded", expanded ? "true" : "false");\r
+        }\r
 \r
         const toggle = document.createElement("button");\r
         toggle.type = "button";\r
         toggle.className = hasChildren ? "tree-toggle" : "tree-toggle is-leaf";\r
-        toggle.tabIndex = hasChildren ? 0 : -1;\r
+        toggle.tabIndex = -1;\r
+        toggle.appendChild(createIcon("chevron"));\r
         if (hasChildren) {\r
           toggle.setAttribute("aria-expanded", expanded ? "true" : "false");\r
           toggle.setAttribute(\r
@@ -2384,8 +2550,12 @@ figma.showUI(`<!DOCTYPE html>\r
         const isGroup = node.template.slice(-1) === "_";\r
         const apply = document.createElement("button");\r
         apply.type = "button";\r
-        apply.className = "tree-apply " + (isGroup ? "is-group" : "is-leaf");\r
+        apply.className =\r
+          "tree-apply " +\r
+          (isGroup ? "is-group" : "is-leaf") +\r
+          (isEditingPresets && customIds[node.id] ? " is-custom" : "");\r
         apply.textContent = node.template;\r
+        apply.tabIndex = -1;\r
         if (isEditingPresets) {\r
           apply.title = "\u041F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u0442\u044C \u0442\u0438\u043F";\r
           apply.addEventListener("click", () => startRenamePreset(node.id));\r
@@ -2405,23 +2575,23 @@ figma.showUI(`<!DOCTYPE html>\r
         const actions = document.createElement("div");\r
         actions.className = "tree-actions";\r
         actions.appendChild(\r
-          createIconButton("+", "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u0432\u043B\u043E\u0436\u0435\u043D\u043D\u044B\u0439 \u0442\u0438\u043F", () =>\r
+          createIconButton("plus", "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u0432\u043B\u043E\u0436\u0435\u043D\u043D\u044B\u0439 \u0442\u0438\u043F", () =>\r
             startAddPreset(node.id)\r
           )\r
         );\r
         actions.appendChild(\r
-          createIconButton("\u2191", "\u041F\u0435\u0440\u0435\u043C\u0435\u0441\u0442\u0438\u0442\u044C \u0432\u0432\u0435\u0440\u0445", () =>\r
+          createIconButton("up", "\u041F\u0435\u0440\u0435\u043C\u0435\u0441\u0442\u0438\u0442\u044C \u0432\u0432\u0435\u0440\u0445", () =>\r
             postToPlugin({ type: "movePreset", id: node.id, direction: "up" })\r
           )\r
         );\r
         actions.appendChild(\r
-          createIconButton("\u2193", "\u041F\u0435\u0440\u0435\u043C\u0435\u0441\u0442\u0438\u0442\u044C \u0432\u043D\u0438\u0437", () =>\r
+          createIconButton("down", "\u041F\u0435\u0440\u0435\u043C\u0435\u0441\u0442\u0438\u0442\u044C \u0432\u043D\u0438\u0437", () =>\r
             postToPlugin({ type: "movePreset", id: node.id, direction: "down" })\r
           )\r
         );\r
         actions.appendChild(\r
           createIconButton(\r
-            "\xD7",\r
+            "close",\r
             "\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u0442\u0438\u043F",\r
             () => {\r
               confirmingDeleteId = node.id;\r
@@ -2466,7 +2636,9 @@ figma.showUI(`<!DOCTYPE html>\r
                   () => {\r
                     editingNodeId = null;\r
                     renderNamesTree();\r
-                  }\r
+                    setPreview("");\r
+                  },\r
+                  (value) => setCascadePreview(node, value)\r
                 )\r
               );\r
             } else if (confirmingDeleteId === node.id) {\r
@@ -2482,7 +2654,8 @@ figma.showUI(`<!DOCTYPE html>\r
                   depth + 1,\r
                   "",\r
                   (value) => commitAddPreset(node.id, value),\r
-                  cancelAddPreset\r
+                  cancelAddPreset,\r
+                  setAddPreview\r
                 )\r
               );\r
             }\r
@@ -2495,7 +2668,13 @@ figma.showUI(`<!DOCTYPE html>\r
 \r
         if (pendingAddParentId === null) {\r
           namesTreeBodyEl.appendChild(\r
-            createInputRow(0, "", (value) => commitAddPreset(null, value), cancelAddPreset)\r
+            createInputRow(\r
+              0,\r
+              "",\r
+              (value) => commitAddPreset(null, value),\r
+              cancelAddPreset,\r
+              setAddPreview\r
+            )\r
           );\r
           rendered++;\r
         }\r
@@ -2509,6 +2688,8 @@ figma.showUI(`<!DOCTYPE html>\r
           namesTreeBodyEl.appendChild(empty);\r
         }\r
 \r
+        applyRovingTabindex();\r
+\r
         if (focusAfterRender) {\r
           const input = focusAfterRender;\r
           focusAfterRender = null;\r
@@ -2516,6 +2697,105 @@ figma.showUI(`<!DOCTYPE html>\r
           input.select();\r
         }\r
       }\r
+\r
+      function setAddPreview(value) {\r
+        const template = value.trim();\r
+        namesPreviewEl.textContent = template\r
+          ? "\u041D\u043E\u0432\u044B\u0439 \u0442\u0438\u043F " + template + "   \xB7   Enter, Esc \u2014 \u043E\u0442\u043C\u0435\u043D\u0430"\r
+          : "\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u0438\u043C\u044F \u0442\u0438\u043F\u0430   \xB7   Esc \u2014 \u043E\u0442\u043C\u0435\u043D\u0430";\r
+        namesPreviewEl.classList.toggle("is-active", template.length > 0);\r
+      }\r
+\r
+      /* \u041A\u043B\u0430\u0432\u0438\u0430\u0442\u0443\u0440\u0430: \u0442\u0430\u0431\u0431\u0435\u043B\u044C\u043D\u0430 \u0442\u043E\u043B\u044C\u043A\u043E \u043E\u0434\u043D\u0430 \u0441\u0442\u0440\u043E\u043A\u0430 \u0434\u0435\u0440\u0435\u0432\u0430, \u0432\u043D\u0443\u0442\u0440\u0438 \u0445\u043E\u0434\u0438\u043C\r
+         \u0441\u0442\u0440\u0435\u043B\u043A\u0430\u043C\u0438. \u0418\u043D\u0430\u0447\u0435 \u043D\u0430 71 \u0441\u0442\u0440\u043E\u043A\u0435 \u043F\u043E\u043B\u0443\u0447\u0430\u0435\u0442\u0441\u044F \u0431\u043E\u043B\u044C\u0448\u0435 \u0441\u043E\u0442\u043D\u0438 \u0442\u0430\u0431\u0441\u0442\u043E\u043F\u043E\u0432. */\r
+      function treeRows() {\r
+        return [...namesTreeBodyEl.querySelectorAll('[role="treeitem"]')];\r
+      }\r
+\r
+      function applyRovingTabindex() {\r
+        const rows = treeRows();\r
+        if (rows.length === 0) return;\r
+        if (focusedRowIndex >= rows.length) focusedRowIndex = rows.length - 1;\r
+        if (focusedRowIndex < 0) focusedRowIndex = 0;\r
+        rows.forEach((row, index) => {\r
+          row.tabIndex = index === focusedRowIndex ? 0 : -1;\r
+        });\r
+      }\r
+\r
+      function focusRow(index, rows) {\r
+        const all = rows || treeRows();\r
+        if (all.length === 0) return;\r
+        focusedRowIndex = Math.max(0, Math.min(index, all.length - 1));\r
+        applyRovingTabindex();\r
+        all[focusedRowIndex].focus();\r
+      }\r
+\r
+      function nodeForRow(row) {\r
+        return row ? findPresetNode(namePresets, row.dataset.id) : null;\r
+      }\r
+\r
+      namesTreeBodyEl.addEventListener("focusin", (event) => {\r
+        const row = event.target.closest('[role="treeitem"]');\r
+        if (!row) return;\r
+        const rows = treeRows();\r
+        const index = rows.indexOf(row);\r
+        if (index !== -1) {\r
+          focusedRowIndex = index;\r
+          applyRovingTabindex();\r
+        }\r
+        const node = nodeForRow(row);\r
+        if (node && !isEditingPresets) {\r
+          setPreview(node.template);\r
+        }\r
+      });\r
+\r
+      namesTreeBodyEl.addEventListener("keydown", (event) => {\r
+        const row = event.target.closest('[role="treeitem"]');\r
+        if (!row) return;\r
+        const rows = treeRows();\r
+        const index = rows.indexOf(row);\r
+        const node = nodeForRow(row);\r
+        if (!node) return;\r
+        const hasChildren = (node.children || []).length > 0;\r
+        const expanded = Boolean(expandedIds[node.id]);\r
+\r
+        if (event.key === "ArrowDown") {\r
+          event.preventDefault();\r
+          focusRow(index + 1, rows);\r
+        } else if (event.key === "ArrowUp") {\r
+          event.preventDefault();\r
+          focusRow(index - 1, rows);\r
+        } else if (event.key === "ArrowRight") {\r
+          event.preventDefault();\r
+          if (hasChildren && !expanded) {\r
+            expandedIds[node.id] = true;\r
+            renderNamesTree();\r
+            focusRow(index, treeRows());\r
+          } else {\r
+            focusRow(index + 1, rows);\r
+          }\r
+        } else if (event.key === "ArrowLeft") {\r
+          event.preventDefault();\r
+          if (hasChildren && expanded) {\r
+            expandedIds[node.id] = false;\r
+            renderNamesTree();\r
+            focusRow(index, treeRows());\r
+          } else {\r
+            focusRow(index - 1, rows);\r
+          }\r
+        } else if (event.key === "Enter" || event.key === " ") {\r
+          event.preventDefault();\r
+          if (isEditingPresets) {\r
+            startRenamePreset(node.id);\r
+          } else {\r
+            applyNamePreset(node.template);\r
+          }\r
+        } else if (event.key === "Delete" && isEditingPresets) {\r
+          event.preventDefault();\r
+          confirmingDeleteId = node.id;\r
+          renderNamesTree();\r
+        }\r
+      });\r
 \r
       /* \u041F\u0440\u0430\u0432\u043A\u0430 \u0434\u0435\u0440\u0435\u0432\u0430: \u043D\u0430\u043C\u0435\u0440\u0435\u043D\u0438\u0435 \u0443\u0445\u043E\u0434\u0438\u0442 \u0432 main, \u043E\u0442\u0442\u0443\u0434\u0430 \u043F\u0440\u0438\u0445\u043E\u0434\u0438\u0442 \u043D\u043E\u0432\u043E\u0435 \u0434\u0435\u0440\u0435\u0432\u043E. */\r
 \r
@@ -2601,9 +2881,14 @@ figma.showUI(`<!DOCTYPE html>\r
       }\r
 \r
       function renderResetControl() {\r
-        namesResetEl.textContent = confirmingReset ? "\u0422\u043E\u0447\u043D\u043E \u0441\u0431\u0440\u043E\u0441\u0438\u0442\u044C?" : "\u0421\u0431\u0440\u043E\u0441\u0438\u0442\u044C";\r
+        const customCount = Object.keys(customIds).length;\r
+        namesResetEl.textContent = confirmingReset\r
+          ? "\u0422\u043E\u0447\u043D\u043E \u0441\u0431\u0440\u043E\u0441\u0438\u0442\u044C?"\r
+          : customCount > 0\r
+            ? "\u0421\u0431\u0440\u043E\u0441\u0438\u0442\u044C (" + customCount + ")"\r
+            : "\u0421\u0431\u0440\u043E\u0441\u0438\u0442\u044C";\r
         namesEditHintEl.textContent = confirmingReset\r
-          ? "\u043F\u0440\u0430\u0432\u043A\u0438 \u0431\u0443\u0434\u0443\u0442 \u043F\u043E\u0442\u0435\u0440\u044F\u043D\u044B"\r
+          ? "\u0441\u0432\u043E\u0438 \u043F\u0440\u0430\u0432\u043A\u0438 \u0431\u0443\u0434\u0443\u0442 \u043F\u043E\u0442\u0435\u0440\u044F\u043D\u044B"\r
           : "\u043A\u043B\u0438\u043A \u043F\u043E \u0441\u0442\u0440\u043E\u043A\u0435 \u2014 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u0442\u044C";\r
       }\r
 \r
@@ -2615,6 +2900,10 @@ figma.showUI(`<!DOCTYPE html>\r
         confirmingReset = false;\r
         renderResetControl();\r
         startAddPreset(null);\r
+      });\r
+\r
+      namesUndoEl.addEventListener("click", () => {\r
+        postToPlugin({ type: "undoPresetEdit" });\r
       });\r
 \r
       namesResetEl.addEventListener("click", () => {\r
@@ -2736,11 +3025,20 @@ figma.showUI(`<!DOCTYPE html>\r
         if (msg.type === "layerNamePresets") {\r
           if (Array.isArray(msg.presets) && msg.presets.length > 0) {\r
             namePresets = msg.presets;\r
+            customIds = {};\r
+            for (const id of msg.customIds || []) {\r
+              customIds[id] = true;\r
+            }\r
             editingNodeId = null;\r
             pendingAddParentId = undefined;\r
             confirmingDeleteId = null;\r
             renderNamesTree();\r
+            renderResetControl();\r
+            if (isEditingPresets) {\r
+              setPreview("");\r
+            }\r
           }\r
+          namesUndoEl.classList.toggle("is-visible", Boolean(msg.canUndo));\r
           if (msg.notice) {\r
             namesStatusEl.textContent = msg.notice;\r
           }\r
@@ -2884,6 +3182,14 @@ async function loadPresetTree() {
   presetTreeLoaded = true;
   return presetTree;
 }
+var presetTreeHistory = [];
+var PRESET_HISTORY_LIMIT = 10;
+function pushPresetHistory(tree) {
+  presetTreeHistory.push(tree);
+  if (presetTreeHistory.length > PRESET_HISTORY_LIMIT) {
+    presetTreeHistory.shift();
+  }
+}
 async function savePresetTree(tree) {
   presetTree = tree;
   presetTreeLoaded = true;
@@ -2896,8 +3202,31 @@ function postPresetTreeToUi(notice) {
   figma.ui.postMessage({
     type: "layerNamePresets",
     presets: presetTree,
-    notice
+    notice,
+    canUndo: presetTreeHistory.length > 0,
+    customIds: collectCustomIds(presetTree)
   });
+}
+function collectCustomIds(tree) {
+  const standard = {};
+  const collect = (nodes) => {
+    for (const node of nodes) {
+      standard[node.id] = node.template;
+      if (node.children) collect(node.children);
+    }
+  };
+  collect(defaultPresetTree());
+  const ids = [];
+  const walk = (nodes) => {
+    for (const node of nodes) {
+      if (standard[node.id] !== node.template) {
+        ids.push(node.id);
+      }
+      if (node.children) walk(node.children);
+    }
+  };
+  walk(tree);
+  return ids;
 }
 function postSelectionToUi() {
   figma.ui.postMessage({
@@ -2906,7 +3235,7 @@ function postSelectionToUi() {
   });
 }
 function postBootstrapToUi() {
-  figma.ui.postMessage({ type: "pluginVersion", version: "1.3.0" });
+  figma.ui.postMessage({ type: "pluginVersion", version: "1.3.1" });
   postSelectionToUi();
   if (presetTreeLoaded) {
     postPresetTreeToUi();
@@ -3062,6 +3391,7 @@ figma.ui.onmessage = async (raw) => {
       postPresetTreeToUi("\u0422\u0438\u043F \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D \u2014 \u0441\u043F\u0438\u0441\u043E\u043A \u043E\u0431\u043D\u043E\u0432\u043B\u0451\u043D.");
       return;
     }
+    pushPresetHistory(tree);
     await savePresetTree(result.tree);
     if (previousTemplate.length > 0) {
       await rewriteRecentTemplate(previousTemplate, raw.template.trim());
@@ -3077,6 +3407,7 @@ figma.ui.onmessage = async (raw) => {
       postPresetTreeToUi("\u041F\u0443\u0441\u0442\u043E\u0435 \u0438\u043C\u044F \u2014 \u0442\u0438\u043F \u043D\u0435 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D.");
       return;
     }
+    pushPresetHistory(tree);
     await savePresetTree(result.tree);
     postPresetTreeToUi(`\u0414\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u043E: ${raw.template.trim()}`);
     return;
@@ -3088,20 +3419,35 @@ figma.ui.onmessage = async (raw) => {
       postPresetTreeToUi("\u0422\u0438\u043F \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D \u2014 \u0441\u043F\u0438\u0441\u043E\u043A \u043E\u0431\u043D\u043E\u0432\u043B\u0451\u043D.");
       return;
     }
+    pushPresetHistory(tree);
     await savePresetTree(result.tree);
     postPresetTreeToUi(`\u0423\u0434\u0430\u043B\u0435\u043D\u043E \u0442\u0438\u043F\u043E\u0432: ${result.removed}.`);
     return;
   }
   if (raw.type === "movePreset") {
     const tree = await loadPresetTree();
+    pushPresetHistory(tree);
     await savePresetTree(movePreset(tree, raw.id, raw.direction));
     postPresetTreeToUi();
     return;
   }
   if (raw.type === "resetPresets") {
+    const previous = await loadPresetTree();
     const tree = defaultPresetTree();
+    pushPresetHistory(previous);
     await savePresetTree(tree);
     postPresetTreeToUi(`\u0421\u043F\u0438\u0441\u043E\u043A \u0441\u0431\u0440\u043E\u0448\u0435\u043D \u043A \u0441\u0442\u0430\u043D\u0434\u0430\u0440\u0442\u043D\u043E\u043C\u0443 (${countPresets(tree)}).`);
+    return;
+  }
+  if (raw.type === "undoPresetEdit") {
+    await loadPresetTree();
+    const previous = presetTreeHistory.pop();
+    if (!previous) {
+      postPresetTreeToUi();
+      return;
+    }
+    await savePresetTree(previous);
+    postPresetTreeToUi("\u041E\u0442\u043C\u0435\u043D\u0435\u043D\u043E.");
     return;
   }
   if (raw.type === "focusNode") {

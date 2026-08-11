@@ -303,6 +303,9 @@
       }
 
       /* Вкладка «Ренейминг»: поиск, недавние, дерево пресетов */
+      .search-input.names-search-first {
+        margin-top: 0;
+      }
       .search-input {
         width: 100%;
         margin-top: 10px;
@@ -375,7 +378,7 @@
         color: var(--accent);
       }
       .tree-body {
-        max-height: 216px;
+        max-height: 270px;
         padding: 4px 0;
         overflow-y: auto;
         background: var(--figma-color-bg);
@@ -385,32 +388,45 @@
         align-items: center;
         gap: 2px;
         padding-right: 6px;
-        padding-left: calc(4px + var(--depth) * 14px);
+        padding-left: calc(4px + var(--depth) * 12px);
+        /* Направляющие вложенности: по 1px линии на каждый уровень отступа. */
+        background-image: repeating-linear-gradient(
+          to right,
+          var(--figma-color-border) 0 1px,
+          transparent 1px 12px
+        );
+        background-repeat: no-repeat;
+        background-position: 11px 0;
+        background-size: calc(var(--depth) * 12px) 100%;
+        transition: background-color 0.12s ease;
+      }
+      .tree-row:hover,
+      .tree-row:focus-within {
+        background-color: var(--figma-color-bg-hover);
       }
       .tree-toggle {
-        flex: 0 0 18px;
-        width: 18px;
-        height: 22px;
+        flex: 0 0 20px;
+        width: 20px;
+        height: 26px;
         margin: 0;
         padding: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
         border: none;
         border-radius: 4px;
         background: transparent;
         color: var(--figma-color-text-secondary);
         cursor: pointer;
         font: inherit;
-        line-height: 22px;
       }
-      .tree-toggle::before {
-        content: "›";
-        display: block;
+      .tree-toggle svg {
         transition: transform 0.12s ease;
       }
-      .tree-toggle[aria-expanded="true"]::before {
+      .tree-toggle[aria-expanded="true"] svg {
         transform: rotate(90deg);
       }
       .tree-toggle:hover {
-        background: var(--figma-color-bg-hover);
         color: var(--figma-color-text);
       }
       .tree-toggle.is-leaf {
@@ -421,7 +437,7 @@
         flex: 1;
         min-width: 0;
         margin: 0;
-        padding: 4px 7px;
+        padding: 5px 7px;
         border: none;
         border-radius: 5px;
         background: transparent;
@@ -433,7 +449,6 @@
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
-        transition: background 0.12s ease;
       }
       .tree-apply.is-group {
         font-weight: 600;
@@ -441,14 +456,20 @@
       .tree-apply.is-leaf {
         color: var(--figma-color-text-secondary);
       }
-      .tree-apply:hover,
       .tree-apply:focus-visible {
         outline: none;
-        background: var(--accent-soft);
-        color: var(--figma-color-text);
+        box-shadow: inset 0 0 0 1px var(--accent);
       }
-      .tree.is-idle .tree-apply {
-        opacity: 0.55;
+      /* Свой тип: добавлен или переименован относительно стандартного набора. */
+      .tree-apply.is-custom::after {
+        content: "";
+        display: inline-block;
+        width: 4px;
+        height: 4px;
+        margin-left: 6px;
+        border-radius: 50%;
+        vertical-align: middle;
+        background: var(--accent);
       }
       .tree-empty {
         padding: 16px 10px;
@@ -482,28 +503,40 @@
         display: none;
         flex: 0 0 auto;
         gap: 1px;
+        /* Приглушены, пока строка не под курсором: 71 строка иначе рябит. */
+        opacity: 0.4;
+        transition: opacity 0.12s ease;
       }
       .tree.is-editing .tree-actions {
         display: flex;
       }
+      .tree-row:hover .tree-actions,
+      .tree-row:focus-within .tree-actions {
+        opacity: 1;
+      }
       .icon-btn {
-        width: 20px;
-        height: 20px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 24px;
+        height: 24px;
         margin: 0;
         padding: 0;
         border: none;
-        border-radius: 4px;
+        border-radius: 5px;
         background: transparent;
         color: var(--figma-color-text-secondary);
         cursor: pointer;
         font: inherit;
-        font-size: 12px;
-        line-height: 20px;
-        text-align: center;
         transition: background 0.12s ease, color 0.12s ease;
       }
       .icon-btn:hover {
-        background: var(--figma-color-bg-hover);
+        background: var(--figma-color-bg-secondary);
+        color: var(--figma-color-text);
+      }
+      .icon-btn:focus-visible {
+        outline: none;
+        box-shadow: 0 0 0 2px var(--accent-soft);
         color: var(--figma-color-text);
       }
       .icon-btn.is-danger:hover {
@@ -557,11 +590,14 @@
         box-shadow: 0 0 0 3px var(--accent-soft);
       }
 
+      /* Предпросмотр — рамка без заливки, статус — заливка. Раньше у обоих был
+         одинаковый фон, и они читались как одна серая плита. */
       .preview {
         margin-top: 8px;
-        padding: 7px 10px;
+        padding: 6px 10px;
+        border: 1px solid var(--figma-color-border);
         border-radius: var(--radius-sm);
-        background: var(--figma-color-bg-secondary);
+        background: transparent;
         color: var(--figma-color-text-secondary);
         font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;
         font-size: 10.5px;
@@ -572,7 +608,48 @@
         text-overflow: ellipsis;
       }
       .preview.is-active {
+        border-color: var(--accent);
+        background: var(--accent-soft);
         color: var(--figma-color-text);
+      }
+
+      /* Строка статуса с ссылкой «Отменить» справа. */
+      .status-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        margin-top: 10px;
+        min-height: 34px;
+      }
+      .status-row .status {
+        flex: 1;
+        min-width: 0;
+        margin-top: 0;
+      }
+      .status-row .status:empty {
+        display: block;
+        background: transparent;
+      }
+      #namesUndo {
+        display: none;
+        flex: 0 0 auto;
+        margin: 0;
+        padding: 8px 10px;
+        border: 1px solid var(--figma-color-border);
+        border-radius: var(--radius-sm);
+        background: var(--figma-color-bg);
+        color: var(--accent);
+        cursor: pointer;
+        font: inherit;
+        font-size: 11px;
+        font-weight: 500;
+      }
+      #namesUndo.is-visible {
+        display: block;
+      }
+      #namesUndo:hover {
+        background: var(--accent-soft);
+        border-color: var(--accent);
       }
 
       /* «Как это работает» */
@@ -813,14 +890,11 @@
     </div>
 
     <div id="panelNames" class="panel" role="tabpanel" aria-labelledby="tabNames">
-      <p class="hint">
-        Выделите слои и нажмите тип — плагин переименует их сверху вниз, как
-        в панели Layers. Нумерация всегда с <code>01</code>.
-      </p>
-
+      <!-- Отдельной подсказки нет: полоса предпросмотра над статусом говорит
+           то же самое и всегда актуальным числом выделенных слоёв. -->
       <input
         type="search"
-        class="search-input"
+        class="search-input names-search-first"
         id="namesSearch"
         placeholder="Поиск по типам — Eyes, Hair, Dress…"
         aria-label="Поиск по типам"
@@ -836,7 +910,6 @@
         <div class="list-header">
           <span>Типы слоёв</span>
           <span class="tree-header-right">
-            <span class="tree-count" id="namesSelectionCount">Выделено: 0</span>
             <button
               type="button"
               class="linkish"
@@ -856,7 +929,10 @@
       </div>
 
       <div class="preview" id="namesPreview" aria-live="polite"></div>
-      <div class="status" id="namesStatus" role="status"></div>
+      <div class="status-row">
+        <div class="status" id="namesStatus" role="status"></div>
+        <button type="button" id="namesUndo">Отменить</button>
+      </div>
 
       <details>
         <summary>Как это работает</summary>
@@ -1137,8 +1213,8 @@
       const namesRecentChipsEl = document.getElementById("namesRecentChips");
       const namesTreeEl = document.getElementById("namesTree");
       const namesTreeBodyEl = document.getElementById("namesTreeBody");
-      const namesSelectionCountEl = document.getElementById("namesSelectionCount");
       const namesPreviewEl = document.getElementById("namesPreview");
+      const namesUndoEl = document.getElementById("namesUndo");
       const namesEditToggleEl = document.getElementById("namesEditToggle");
       const namesEditBarEl = document.getElementById("namesEditBar");
       const namesAddRootEl = document.getElementById("namesAddRoot");
@@ -1146,15 +1222,45 @@
       const namesEditHintEl = document.getElementById("namesEditHint");
 
       const RECENT_LIMIT = 5;
-      const PREVIEW_IDLE = "Наведите на тип — покажу будущие имена.";
       const PREVIEW_EDIT =
         "Правка списка: клик по строке — переименовать, + — вложенный тип.";
+
+      /* Инлайновые иконки: текстовые глифы «+ ↑ ↓ ×» вставали по-разному
+         по базовой линии и плотности. */
+      const ICON_PATHS = {
+        chevron: "M4.5 2.5 L8 6 L4.5 9.5",
+        plus: "M6 2.5 V9.5 M2.5 6 H9.5",
+        up: "M6 9.5 V2.5 M3 5.5 L6 2.5 L9 5.5",
+        down: "M6 2.5 V9.5 M3 6.5 L6 9.5 L9 6.5",
+        close: "M3.2 3.2 L8.8 8.8 M8.8 3.2 L3.2 8.8",
+      };
+
+      function createIcon(name) {
+        const NS = "http://www.w3.org/2000/svg";
+        const svg = document.createElementNS(NS, "svg");
+        svg.setAttribute("viewBox", "0 0 12 12");
+        svg.setAttribute("width", "12");
+        svg.setAttribute("height", "12");
+        svg.setAttribute("fill", "none");
+        svg.setAttribute("aria-hidden", "true");
+        const path = document.createElementNS(NS, "path");
+        path.setAttribute("d", ICON_PATHS[name]);
+        path.setAttribute("stroke", "currentColor");
+        path.setAttribute("stroke-width", "1.5");
+        path.setAttribute("stroke-linecap", "round");
+        path.setAttribute("stroke-linejoin", "round");
+        svg.appendChild(path);
+        return svg;
+      }
 
       let namePresets = [];
       let recentTemplates = [];
       let expandedIds = {};
+      let customIds = {};
       let namesFilter = "";
       let selectionCount = 0;
+      let hoveredTemplate = "";
+      let focusedRowIndex = 0;
 
       // Режим правки дерева. Обычный клик по строке переименовывает слои,
       // поэтому редактирование живёт в отдельном режиме — меньше промахов.
@@ -1182,12 +1288,7 @@
         return segments.join("_");
       }
 
-      function previewLine(template) {
-        const count = selectionCount;
-        if (count === 0) {
-          return "Нет выделения · будет " + previewName(template, 0) + ", " +
-            previewName(template, 1) + " …";
-        }
+      function namesForCount(template, count) {
         if (count === 1) {
           return previewName(template, 0);
         }
@@ -1203,30 +1304,82 @@
         );
       }
 
+      /**
+       * Полоса предпросмотра — единственное место, где видно и сколько слоёв
+       * выделено, и что с ними станет. Раньше счётчик жил в шапке дерева,
+       * в 235px от будущих имён.
+       */
       function setPreview(template) {
+        hoveredTemplate = template || "";
         if (isEditingPresets) {
           namesPreviewEl.textContent = PREVIEW_EDIT;
           namesPreviewEl.classList.remove("is-active");
           return;
         }
-        if (!template) {
-          namesPreviewEl.textContent = PREVIEW_IDLE;
+        if (selectionCount === 0) {
+          namesPreviewEl.textContent = "Выделите слои на канвасе";
           namesPreviewEl.classList.remove("is-active");
           return;
         }
-        namesPreviewEl.textContent = previewLine(template);
+        if (!template) {
+          namesPreviewEl.textContent =
+            pluralLayers(selectionCount) + " — наведите на тип";
+          namesPreviewEl.classList.remove("is-active");
+          return;
+        }
+        namesPreviewEl.textContent =
+          selectionCount + " → " + namesForCount(template, selectionCount);
+        namesPreviewEl.classList.add("is-active");
+      }
+
+      /** Что произойдёт с вложенными при переименовании ветки. */
+      function setCascadePreview(node, nextTemplate) {
+        const template = nextTemplate.trim();
+        const affected = [];
+        const walk = (nodes) => {
+          for (const child of nodes) {
+            if (child.template.indexOf(node.template) === 0) {
+              affected.push(child);
+            }
+            walk(child.children || []);
+          }
+        };
+        walk(node.children || []);
+
+        if (template.length === 0) {
+          namesPreviewEl.textContent = "Пустое имя — Enter не сохранит";
+          namesPreviewEl.classList.remove("is-active");
+          return;
+        }
+        if (template === node.template) {
+          namesPreviewEl.textContent =
+            affected.length > 0
+              ? "Вложенных обновится вместе: " + affected.length
+              : "Введите новое имя   ·   Esc — отмена";
+          namesPreviewEl.classList.remove("is-active");
+          return;
+        }
+        if (affected.length === 0) {
+          namesPreviewEl.textContent =
+            node.template + " → " + template + "   ·   Enter, Esc — отмена";
+          namesPreviewEl.classList.add("is-active");
+          return;
+        }
+        const sample =
+          template + affected[0].template.slice(node.template.length);
+        namesPreviewEl.textContent =
+          affected[0].template +
+          " → " +
+          sample +
+          (affected.length > 1 ? ", и ещё " + (affected.length - 1) : "");
         namesPreviewEl.classList.add("is-active");
       }
 
       function setSelectionCount(count) {
         selectionCount = count;
-        namesSelectionCountEl.textContent = "Выделено: " + count;
-        namesSelectionCountEl.classList.toggle("is-ready", count > 0);
-        // В режиме правки выделение не нужно — не приглушаем дерево.
-        namesTreeEl.classList.toggle(
-          "is-idle",
-          count === 0 && !isEditingPresets
-        );
+        if (!isEditingPresets) {
+          setPreview(hoveredTemplate);
+        }
       }
 
       function matchesFilter(node, query) {
@@ -1258,12 +1411,13 @@
         return spacer;
       }
 
-      function createIconButton(glyph, label, onClick, danger) {
+      function createIconButton(icon, label, onClick, danger) {
         const button = document.createElement("button");
         button.type = "button";
         button.className = "icon-btn" + (danger ? " is-danger" : "");
-        button.textContent = glyph;
+        button.appendChild(createIcon(icon));
         button.title = label;
+        button.tabIndex = -1;
         button.setAttribute("aria-label", label);
         button.addEventListener("click", (event) => {
           event.stopPropagation();
@@ -1273,7 +1427,7 @@
       }
 
       /** Строка-инпут: инлайн-переименование и добавление нового типа. */
-      function createInputRow(depth, value, onCommit, onCancel) {
+      function createInputRow(depth, value, onCommit, onCancel, onInput) {
         const row = createRowShell(depth);
         row.appendChild(createSpacer());
 
@@ -1306,6 +1460,10 @@
           }
         });
         input.addEventListener("blur", commit);
+        if (onInput) {
+          input.addEventListener("input", () => onInput(input.value));
+          onInput(input.value);
+        }
 
         row.appendChild(input);
         focusAfterRender = input;
@@ -1320,9 +1478,11 @@
         wrap.className = "tree-confirm";
         const label = document.createElement("span");
         const nested = countPresetNodes(node.children || []);
+        // Имя обязательно: иначе после скролла непонятно, что удаляешь.
         label.textContent = nested > 0
-          ? "Удалить с вложенными (" + nested + ")?"
-          : "Удалить?";
+          ? "Удалить " + node.template + " и " + nested + " вложенных?"
+          : "Удалить " + node.template + "?";
+        label.title = label.textContent;
         wrap.appendChild(label);
 
         const yes = document.createElement("button");
@@ -1352,11 +1512,17 @@
         const children = node.children || [];
         const hasChildren = children.length > 0;
         const row = createRowShell(depth);
+        row.setAttribute("role", "treeitem");
+        row.dataset.id = node.id;
+        if (hasChildren) {
+          row.setAttribute("aria-expanded", expanded ? "true" : "false");
+        }
 
         const toggle = document.createElement("button");
         toggle.type = "button";
         toggle.className = hasChildren ? "tree-toggle" : "tree-toggle is-leaf";
-        toggle.tabIndex = hasChildren ? 0 : -1;
+        toggle.tabIndex = -1;
+        toggle.appendChild(createIcon("chevron"));
         if (hasChildren) {
           toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
           toggle.setAttribute(
@@ -1374,8 +1540,12 @@
         const isGroup = node.template.slice(-1) === "_";
         const apply = document.createElement("button");
         apply.type = "button";
-        apply.className = "tree-apply " + (isGroup ? "is-group" : "is-leaf");
+        apply.className =
+          "tree-apply " +
+          (isGroup ? "is-group" : "is-leaf") +
+          (isEditingPresets && customIds[node.id] ? " is-custom" : "");
         apply.textContent = node.template;
+        apply.tabIndex = -1;
         if (isEditingPresets) {
           apply.title = "Переименовать тип";
           apply.addEventListener("click", () => startRenamePreset(node.id));
@@ -1395,23 +1565,23 @@
         const actions = document.createElement("div");
         actions.className = "tree-actions";
         actions.appendChild(
-          createIconButton("+", "Добавить вложенный тип", () =>
+          createIconButton("plus", "Добавить вложенный тип", () =>
             startAddPreset(node.id)
           )
         );
         actions.appendChild(
-          createIconButton("↑", "Переместить вверх", () =>
+          createIconButton("up", "Переместить вверх", () =>
             postToPlugin({ type: "movePreset", id: node.id, direction: "up" })
           )
         );
         actions.appendChild(
-          createIconButton("↓", "Переместить вниз", () =>
+          createIconButton("down", "Переместить вниз", () =>
             postToPlugin({ type: "movePreset", id: node.id, direction: "down" })
           )
         );
         actions.appendChild(
           createIconButton(
-            "×",
+            "close",
             "Удалить тип",
             () => {
               confirmingDeleteId = node.id;
@@ -1456,7 +1626,9 @@
                   () => {
                     editingNodeId = null;
                     renderNamesTree();
-                  }
+                    setPreview("");
+                  },
+                  (value) => setCascadePreview(node, value)
                 )
               );
             } else if (confirmingDeleteId === node.id) {
@@ -1472,7 +1644,8 @@
                   depth + 1,
                   "",
                   (value) => commitAddPreset(node.id, value),
-                  cancelAddPreset
+                  cancelAddPreset,
+                  setAddPreview
                 )
               );
             }
@@ -1485,7 +1658,13 @@
 
         if (pendingAddParentId === null) {
           namesTreeBodyEl.appendChild(
-            createInputRow(0, "", (value) => commitAddPreset(null, value), cancelAddPreset)
+            createInputRow(
+              0,
+              "",
+              (value) => commitAddPreset(null, value),
+              cancelAddPreset,
+              setAddPreview
+            )
           );
           rendered++;
         }
@@ -1499,6 +1678,8 @@
           namesTreeBodyEl.appendChild(empty);
         }
 
+        applyRovingTabindex();
+
         if (focusAfterRender) {
           const input = focusAfterRender;
           focusAfterRender = null;
@@ -1506,6 +1687,105 @@
           input.select();
         }
       }
+
+      function setAddPreview(value) {
+        const template = value.trim();
+        namesPreviewEl.textContent = template
+          ? "Новый тип " + template + "   ·   Enter, Esc — отмена"
+          : "Введите имя типа   ·   Esc — отмена";
+        namesPreviewEl.classList.toggle("is-active", template.length > 0);
+      }
+
+      /* Клавиатура: таббельна только одна строка дерева, внутри ходим
+         стрелками. Иначе на 71 строке получается больше сотни табстопов. */
+      function treeRows() {
+        return [...namesTreeBodyEl.querySelectorAll('[role="treeitem"]')];
+      }
+
+      function applyRovingTabindex() {
+        const rows = treeRows();
+        if (rows.length === 0) return;
+        if (focusedRowIndex >= rows.length) focusedRowIndex = rows.length - 1;
+        if (focusedRowIndex < 0) focusedRowIndex = 0;
+        rows.forEach((row, index) => {
+          row.tabIndex = index === focusedRowIndex ? 0 : -1;
+        });
+      }
+
+      function focusRow(index, rows) {
+        const all = rows || treeRows();
+        if (all.length === 0) return;
+        focusedRowIndex = Math.max(0, Math.min(index, all.length - 1));
+        applyRovingTabindex();
+        all[focusedRowIndex].focus();
+      }
+
+      function nodeForRow(row) {
+        return row ? findPresetNode(namePresets, row.dataset.id) : null;
+      }
+
+      namesTreeBodyEl.addEventListener("focusin", (event) => {
+        const row = event.target.closest('[role="treeitem"]');
+        if (!row) return;
+        const rows = treeRows();
+        const index = rows.indexOf(row);
+        if (index !== -1) {
+          focusedRowIndex = index;
+          applyRovingTabindex();
+        }
+        const node = nodeForRow(row);
+        if (node && !isEditingPresets) {
+          setPreview(node.template);
+        }
+      });
+
+      namesTreeBodyEl.addEventListener("keydown", (event) => {
+        const row = event.target.closest('[role="treeitem"]');
+        if (!row) return;
+        const rows = treeRows();
+        const index = rows.indexOf(row);
+        const node = nodeForRow(row);
+        if (!node) return;
+        const hasChildren = (node.children || []).length > 0;
+        const expanded = Boolean(expandedIds[node.id]);
+
+        if (event.key === "ArrowDown") {
+          event.preventDefault();
+          focusRow(index + 1, rows);
+        } else if (event.key === "ArrowUp") {
+          event.preventDefault();
+          focusRow(index - 1, rows);
+        } else if (event.key === "ArrowRight") {
+          event.preventDefault();
+          if (hasChildren && !expanded) {
+            expandedIds[node.id] = true;
+            renderNamesTree();
+            focusRow(index, treeRows());
+          } else {
+            focusRow(index + 1, rows);
+          }
+        } else if (event.key === "ArrowLeft") {
+          event.preventDefault();
+          if (hasChildren && expanded) {
+            expandedIds[node.id] = false;
+            renderNamesTree();
+            focusRow(index, treeRows());
+          } else {
+            focusRow(index - 1, rows);
+          }
+        } else if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          if (isEditingPresets) {
+            startRenamePreset(node.id);
+          } else {
+            applyNamePreset(node.template);
+          }
+        } else if (event.key === "Delete" && isEditingPresets) {
+          event.preventDefault();
+          confirmingDeleteId = node.id;
+          renderNamesTree();
+        }
+      });
 
       /* Правка дерева: намерение уходит в main, оттуда приходит новое дерево. */
 
@@ -1591,9 +1871,14 @@
       }
 
       function renderResetControl() {
-        namesResetEl.textContent = confirmingReset ? "Точно сбросить?" : "Сбросить";
+        const customCount = Object.keys(customIds).length;
+        namesResetEl.textContent = confirmingReset
+          ? "Точно сбросить?"
+          : customCount > 0
+            ? "Сбросить (" + customCount + ")"
+            : "Сбросить";
         namesEditHintEl.textContent = confirmingReset
-          ? "правки будут потеряны"
+          ? "свои правки будут потеряны"
           : "клик по строке — переименовать";
       }
 
@@ -1605,6 +1890,10 @@
         confirmingReset = false;
         renderResetControl();
         startAddPreset(null);
+      });
+
+      namesUndoEl.addEventListener("click", () => {
+        postToPlugin({ type: "undoPresetEdit" });
       });
 
       namesResetEl.addEventListener("click", () => {
@@ -1726,11 +2015,20 @@
         if (msg.type === "layerNamePresets") {
           if (Array.isArray(msg.presets) && msg.presets.length > 0) {
             namePresets = msg.presets;
+            customIds = {};
+            for (const id of msg.customIds || []) {
+              customIds[id] = true;
+            }
             editingNodeId = null;
             pendingAddParentId = undefined;
             confirmingDeleteId = null;
             renderNamesTree();
+            renderResetControl();
+            if (isEditingPresets) {
+              setPreview("");
+            }
           }
+          namesUndoEl.classList.toggle("is-visible", Boolean(msg.canUndo));
           if (msg.notice) {
             namesStatusEl.textContent = msg.notice;
           }

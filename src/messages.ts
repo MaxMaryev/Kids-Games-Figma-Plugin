@@ -82,6 +82,10 @@ export type ResetPresetsMessage = {
   type: "resetPresets";
 };
 
+export type UndoPresetEditMessage = {
+  type: "undoPresetEdit";
+};
+
 export type PluginMessageFromUi =
   | RasterizeMessage
   | MultipleOfFourCheckMessage
@@ -94,6 +98,7 @@ export type PluginMessageFromUi =
   | RemovePresetMessage
   | MovePresetMessage
   | ResetPresetsMessage
+  | UndoPresetEditMessage
   | FocusNodeMessage
   | SelectNodesMessage
   | RequestPluginVersionMessage
@@ -151,6 +156,10 @@ export type LayerNamePresetsMessage = {
   presets: LayerNamePreset[];
   /** Короткий текст в статус после правки дерева. */
   notice?: string;
+  /** Есть ли что откатывать — UI показывает «Отменить» только тогда. */
+  canUndo?: boolean;
+  /** Типы, добавленные или переименованные относительно стандартного набора. */
+  customIds?: string[];
 };
 
 export type RecentNamePresetsMessage = {
@@ -201,6 +210,7 @@ export function isPluginMessageFromUi(raw: unknown): raw is PluginMessageFromUi 
     type === "removePreset" ||
     type === "movePreset" ||
     type === "resetPresets" ||
+    type === "undoPresetEdit" ||
     type === "focusNode" ||
     type === "selectNodes" ||
     type === "requestPluginVersion" ||
