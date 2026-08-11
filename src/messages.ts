@@ -1,3 +1,6 @@
+import type { LayerNamePreset } from "./domain/layerNamePresets";
+import type { MoveDirection } from "./domain/presetTreeOps";
+
 export type OriginalDisposition = "keep" | "replace" | "hide";
 
 export type RasterizeMessage = {
@@ -37,10 +40,60 @@ export type SetUpdateBannerDismissedMessage = {
   remoteVersion: string;
 };
 
+export type RenameLayersMessage = {
+  type: "renameLayers";
+  template: string;
+};
+
+export type GetRecentNamePresetsMessage = {
+  type: "getRecentNamePresets";
+};
+
+export type SetRecentNamePresetsMessage = {
+  type: "setRecentNamePresets";
+  templates: string[];
+};
+
+export type RenamePresetMessage = {
+  type: "renamePreset";
+  id: string;
+  template: string;
+};
+
+export type AddPresetMessage = {
+  type: "addPreset";
+  /** null — добавить в корень дерева. */
+  parentId: string | null;
+  template: string;
+};
+
+export type RemovePresetMessage = {
+  type: "removePreset";
+  id: string;
+};
+
+export type MovePresetMessage = {
+  type: "movePreset";
+  id: string;
+  direction: MoveDirection;
+};
+
+export type ResetPresetsMessage = {
+  type: "resetPresets";
+};
+
 export type PluginMessageFromUi =
   | RasterizeMessage
   | MultipleOfFourCheckMessage
   | MultipleOfFourFixMessage
+  | RenameLayersMessage
+  | GetRecentNamePresetsMessage
+  | SetRecentNamePresetsMessage
+  | RenamePresetMessage
+  | AddPresetMessage
+  | RemovePresetMessage
+  | MovePresetMessage
+  | ResetPresetsMessage
   | FocusNodeMessage
   | SelectNodesMessage
   | RequestPluginVersionMessage
@@ -84,6 +137,32 @@ export type MultipleOfFourFixResultMessage = {
   errors: string[];
 };
 
+export type RenameLayersResultMessage = {
+  type: "renameLayersResult";
+  ok: boolean;
+  renamed: number;
+  /** Применённые имена в порядке сверху вниз — UI показывает первое и последнее. */
+  names: string[];
+  error?: string;
+};
+
+export type LayerNamePresetsMessage = {
+  type: "layerNamePresets";
+  presets: LayerNamePreset[];
+  /** Короткий текст в статус после правки дерева. */
+  notice?: string;
+};
+
+export type RecentNamePresetsMessage = {
+  type: "recentNamePresets";
+  templates: string[];
+};
+
+export type SelectionChangedMessage = {
+  type: "selectionChanged";
+  count: number;
+};
+
 export type PluginVersionMessage = {
   type: "pluginVersion";
   version: string;
@@ -98,6 +177,10 @@ export type PluginMessageToUi =
   | DoneMessage
   | MultipleOfFourCheckResultMessage
   | MultipleOfFourFixResultMessage
+  | RenameLayersResultMessage
+  | LayerNamePresetsMessage
+  | RecentNamePresetsMessage
+  | SelectionChangedMessage
   | PluginVersionMessage
   | UpdateBannerDismissedMessage;
 
@@ -110,6 +193,14 @@ export function isPluginMessageFromUi(raw: unknown): raw is PluginMessageFromUi 
     type === "rasterize" ||
     type === "multipleOfFourCheck" ||
     type === "multipleOfFourFix" ||
+    type === "renameLayers" ||
+    type === "getRecentNamePresets" ||
+    type === "setRecentNamePresets" ||
+    type === "renamePreset" ||
+    type === "addPreset" ||
+    type === "removePreset" ||
+    type === "movePreset" ||
+    type === "resetPresets" ||
     type === "focusNode" ||
     type === "selectNodes" ||
     type === "requestPluginVersion" ||

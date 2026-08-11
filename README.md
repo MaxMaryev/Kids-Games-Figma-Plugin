@@ -1,38 +1,58 @@
 # 😊 Kids Games Plugin 😊
 
-Плагин для [Figma](https://www.figma.com/) с двумя инструментами для подготовки игровой графики:
+Плагин для [Figma](https://www.figma.com/) с тремя инструментами для подготовки игровой графики:
 
 1. **Растр** — превращает выделенный слой или группу в PNG прямо на канвасе. Появляется прямоугольник с картинкой-заливкой — удобно, когда нужно «зафиксировать» вектор и работать с ним как с готовым ассетом, не выходя из файла.
 2. **Кратность 4** — проверяет, что ширина и высота слоя кратны четырём (важно для текстурных атласов, сжатия и платформенных требований). Если кратности нет, плагин аккуратно оборачивает слой фреймом нужного размера. Сама графика при этом не растягивается.
+3. **Ренейминг** — переименовывает выделение по шаблону из списка типов (`Eyes_`, `Hair_Front_`, `T-shirt_`…) сверху вниз, как в панели Layers, с нумерацией всегда от `01`. Список типов правится прямо в плагине.
 
-## Требования
+## Установка (для художников)
 
-- [Node.js](https://nodejs.org/) (LTS) — для сборки.
-- [Figma для десктопа](https://www.figma.com/downloads/) — плагины из режима разработки запускаются только в десктопном клиенте; в браузерной версии этого пункта меню нет.
+Собирать ничего не нужно — `code.js` уже лежит в репозитории готовым.
 
-## Сборка
+1. Скачайте папку плагина (**Code** → **Download ZIP** на GitHub) и распакуйте её в удобное место. Эта папка должна остаться на диске — Figma читает плагин прямо из неё.
+2. В десктопной Figma: **Plugins** → **Development** → **Import plugin from manifest…**.
+3. Укажите `manifest.json` из папки плагина.
+4. Запуск: **Plugins** → **Development** → **😊 Kids Games Plugin 😊**.
+
+Нужна именно [десктопная Figma](https://www.figma.com/downloads/) — в браузерной версии пункта **Development** нет.
+
+## Обновление
+
+Когда выходит новая версия, плагин показывает баннер. Порядок такой:
+
+1. Закройте плагин в Figma.
+2. В папке плагина запустите `UPDATE.bat` — он скачает свежую версию с GitHub и заменит файлы.
+3. Откройте плагин заново. Внизу окна должна стоять новая версия — это и есть проверка, что всё получилось.
+
+Нужны Node.js, `curl` и `tar` (последние два есть в Windows 10+ из коробки). Переимпортировать плагин в Figma не нужно — путь к папке не меняется.
+
+## Разработка
 
 ```bash
 npm install
 npm run build
 ```
 
-Скрипт [`build.cjs`](build.cjs) собирает [`src/main.ts`](src/main.ts) в `code.js` и встраивает [`ui.html`](ui.html) в плейсхолдер `__html__` (как ожидает [`manifest.json`](manifest.json)).
+Скрипт [`build.cjs`](build.cjs) собирает [`src/main.ts`](src/main.ts) в `code.js` и встраивает [`ui.html`](ui.html) в плейсхолдер `__html__` (как ожидает [`manifest.json`](manifest.json)). Версия из `package.json` попадает в `code.js` как `__PLUGIN_VERSION__` — её показывает подвал окна и по ней работает баннер обновления.
 
-Для разработки с пересборкой при изменениях:
+Пересборка при изменениях:
 
 ```bash
 npm run watch
 ```
 
-## Подключение в Figma
-
-1. Соберите проект (`npm run build`) — рядом должен лежать актуальный `code.js`.
-2. В десктопной Figma: **Plugins** → **Development** → **Import plugin from manifest…**.
-3. Укажите `manifest.json` из корня проекта.
-4. Запуск: **Plugins** → **Development** → **😊 Kids Games Plugin 😊**.
-
 Подробности по полям манифеста — в [документации Figma Plugin API](https://developers.figma.com/docs/plugins/manifest).
+
+## Релиз
+
+`code.js` — не артефакт сборки, а то, что раздаётся пользователям: `UPDATE.bat` просто копирует файлы из репозитория, ничего не собирая. Поэтому `code.js` **лежит в git** и должен быть пересобран перед релизным коммитом.
+
+1. Поднимите `version` в `package.json`.
+2. `npm run release` — соберёт и проверит, что версия внутри `code.js` совпадает с `package.json` (иначе упадёт).
+3. Закоммитьте вместе с `code.js` и запушьте в `main`.
+
+Баннер обновления сравнивает версию, зашитую в `code.js`, с `version` из `package.json` на ветке `main` — до пуша никто ничего не увидит.
 
 ## Вкладка «Растр»
 
@@ -74,7 +94,7 @@ npm run watch
 
 - Нужно явное выделение — без него плагин напомнит выбрать слой.
 - Для растра у слоя должны быть валидные границы.
-- Плагин не выходит в интернет — все операции локальные.
+- Все операции над файлом локальные. В сеть плагин ходит только за одним — читает `package.json` с `raw.githubusercontent.com`, чтобы узнать, не вышла ли новая версия (см. `networkAccess` в [`manifest.json`](manifest.json)).
 
 ## Стек
 
@@ -86,4 +106,9 @@ npm run watch
 - [`src/features/rasterize.ts`](src/features/rasterize.ts) — растрирование.
 - [`src/features/multipleOfFourCheck.ts`](src/features/multipleOfFourCheck.ts) / [`multipleOfFourFix.ts`](src/features/multipleOfFourFix.ts) — Проверить / Поправить.
 - [`src/domain/multipleOfFour.ts`](src/domain/multipleOfFour.ts) — чистая математика кратности и отступов.
+- [`src/features/renameLayers.ts`](src/features/renameLayers.ts) — Ренейминг.
+- [`src/domain/layerNamePresets.ts`](src/domain/layerNamePresets.ts) — стандартный список типов и правила имени.
+- [`src/domain/presetTreeOps.ts`](src/domain/presetTreeOps.ts) — правка списка типов (чистые операции над деревом).
 - [`src/figma/geometry.ts`](src/figma/geometry.ts), [`nodeQueries.ts`](src/figma/nodeQueries.ts) — геометрия и запросы к узлам.
+
+Обновление у пользователя: [`UPDATE.bat`](UPDATE.bat) → [`update-plugin.cjs`](update-plugin.cjs) (скачивание zip, проверка полноты архива, копирование). Релизная сборка — [`release.cjs`](release.cjs).

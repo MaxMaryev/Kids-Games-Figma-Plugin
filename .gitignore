@@ -1,2 +1,8 @@
 node_modules/
-code.js
+
+# code.js НЕ игнорируется: это и есть плагин, который грузит manifest.json.
+# Он лежит в репозитории, чтобы UPDATE.bat мог обновить художника без сборки.
+# Перед релизным коммитом: npm run release
+
+# Временный стенд вёрстки ui.html вне Figma.
+.ui-preview.html

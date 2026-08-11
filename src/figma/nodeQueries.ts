@@ -20,3 +20,36 @@ export function canInsertIntoParent(
 export function isPageLikeParent(parent: BaseNode): boolean {
   return parent.type === "PAGE" || parent.type === "DOCUMENT";
 }
+
+/**
+ * Путь индексов от корня документа до узла. В Figma children[0] — нижний слой,
+ * поэтому в панели Layers порядок обратный: больший индекс = выше.
+ */
+function layerOrderPath(node: SceneNode): number[] {
+  const path: number[] = [];
+  let current: BaseNode = node;
+  while (current.parent) {
+    const parent: BaseNode = current.parent;
+    if (!("children" in parent)) {
+      break;
+    }
+    path.unshift((parent.children as readonly BaseNode[]).indexOf(current));
+    current = parent;
+  }
+  return path;
+}
+
+/** Порядок как в панели Layers: сверху вниз, родитель выше своих детей. */
+export function sortNodesTopToBottom(nodes: readonly SceneNode[]): SceneNode[] {
+  const decorated = nodes.map((node) => ({ node, path: layerOrderPath(node) }));
+  decorated.sort((a, b) => {
+    const shared = Math.min(a.path.length, b.path.length);
+    for (let level = 0; level < shared; level++) {
+      if (a.path[level] !== b.path[level]) {
+        return b.path[level] - a.path[level];
+      }
+    }
+    return a.path.length - b.path.length;
+  });
+  return decorated.map((item) => item.node);
+}

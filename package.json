@@ -1,10 +1,12 @@
 {
   "name": "figma-vector-to-raster",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "private": true,
   "scripts": {
     "build": "node build.cjs",
-    "watch": "node build.cjs --watch"
+    "watch": "node build.cjs --watch",
+    "release": "node release.cjs",
+    "verify": "node verify.cjs"
   },
   "devDependencies": {
     "@figma/plugin-typings": "^1.110.0",

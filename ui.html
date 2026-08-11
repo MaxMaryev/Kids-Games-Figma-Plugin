@@ -39,7 +39,9 @@
       .tabs button {
         flex: 1;
         margin: 0;
-        padding: 7px 10px;
+        padding: 7px 4px;
+        font-size: 11px;
+        white-space: nowrap;
         border: none;
         background: transparent;
         color: var(--figma-color-text-secondary);
@@ -300,6 +302,279 @@
         background: var(--accent-soft);
       }
 
+      /* Вкладка «Ренейминг»: поиск, недавние, дерево пресетов */
+      .search-input {
+        width: 100%;
+        margin-top: 10px;
+        padding: 7px 10px;
+        border: 1px solid var(--figma-color-border);
+        border-radius: var(--radius-sm);
+        background: var(--figma-color-bg);
+        color: var(--figma-color-text);
+        font: inherit;
+      }
+      .search-input::placeholder {
+        color: var(--figma-color-text-secondary);
+      }
+      .search-input:focus {
+        outline: none;
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px var(--accent-soft);
+      }
+
+      .recent {
+        display: none;
+        margin-top: 8px;
+      }
+      .recent.is-visible {
+        display: block;
+      }
+      .recent-title {
+        font-size: 10px;
+        font-weight: 600;
+        color: var(--figma-color-text-secondary);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+      .chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        margin-top: 5px;
+      }
+      .chip {
+        margin: 0;
+        padding: 3px 9px;
+        border: 1px solid var(--figma-color-border);
+        border-radius: 999px;
+        background: var(--figma-color-bg);
+        color: var(--figma-color-text);
+        cursor: pointer;
+        font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;
+        font-size: 10.5px;
+        transition: background 0.15s ease, border-color 0.15s ease;
+      }
+      .chip:hover {
+        border-color: var(--accent);
+        background: var(--accent-soft);
+      }
+
+      .tree {
+        margin-top: 10px;
+        border-radius: var(--radius-sm);
+        background: var(--figma-color-bg-secondary);
+        overflow: hidden;
+      }
+      .tree-count {
+        font-weight: 500;
+        text-transform: none;
+        letter-spacing: 0;
+        color: var(--figma-color-text-secondary);
+      }
+      .tree-count.is-ready {
+        color: var(--accent);
+      }
+      .tree-body {
+        max-height: 216px;
+        padding: 4px 0;
+        overflow-y: auto;
+        background: var(--figma-color-bg);
+      }
+      .tree-row {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+        padding-right: 6px;
+        padding-left: calc(4px + var(--depth) * 14px);
+      }
+      .tree-toggle {
+        flex: 0 0 18px;
+        width: 18px;
+        height: 22px;
+        margin: 0;
+        padding: 0;
+        border: none;
+        border-radius: 4px;
+        background: transparent;
+        color: var(--figma-color-text-secondary);
+        cursor: pointer;
+        font: inherit;
+        line-height: 22px;
+      }
+      .tree-toggle::before {
+        content: "›";
+        display: block;
+        transition: transform 0.12s ease;
+      }
+      .tree-toggle[aria-expanded="true"]::before {
+        transform: rotate(90deg);
+      }
+      .tree-toggle:hover {
+        background: var(--figma-color-bg-hover);
+        color: var(--figma-color-text);
+      }
+      .tree-toggle.is-leaf {
+        visibility: hidden;
+        pointer-events: none;
+      }
+      .tree-apply {
+        flex: 1;
+        min-width: 0;
+        margin: 0;
+        padding: 4px 7px;
+        border: none;
+        border-radius: 5px;
+        background: transparent;
+        color: var(--figma-color-text);
+        cursor: pointer;
+        text-align: left;
+        font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;
+        font-size: 11px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        transition: background 0.12s ease;
+      }
+      .tree-apply.is-group {
+        font-weight: 600;
+      }
+      .tree-apply.is-leaf {
+        color: var(--figma-color-text-secondary);
+      }
+      .tree-apply:hover,
+      .tree-apply:focus-visible {
+        outline: none;
+        background: var(--accent-soft);
+        color: var(--figma-color-text);
+      }
+      .tree.is-idle .tree-apply {
+        opacity: 0.55;
+      }
+      .tree-empty {
+        padding: 16px 10px;
+        color: var(--figma-color-text-secondary);
+        font-size: 11px;
+        text-align: center;
+      }
+
+      /* Режим правки дерева */
+      .tree-header-right {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .tree-editbar {
+        display: none;
+        gap: 4px;
+        align-items: center;
+        padding: 0 6px 6px;
+        background: var(--figma-color-bg-secondary);
+      }
+      .tree.is-editing .tree-editbar {
+        display: flex;
+      }
+      .tree-editbar .confirm-text {
+        font-size: 10.5px;
+        color: var(--figma-color-text-secondary);
+        margin-left: auto;
+      }
+      .tree-actions {
+        display: none;
+        flex: 0 0 auto;
+        gap: 1px;
+      }
+      .tree.is-editing .tree-actions {
+        display: flex;
+      }
+      .icon-btn {
+        width: 20px;
+        height: 20px;
+        margin: 0;
+        padding: 0;
+        border: none;
+        border-radius: 4px;
+        background: transparent;
+        color: var(--figma-color-text-secondary);
+        cursor: pointer;
+        font: inherit;
+        font-size: 12px;
+        line-height: 20px;
+        text-align: center;
+        transition: background 0.12s ease, color 0.12s ease;
+      }
+      .icon-btn:hover {
+        background: var(--figma-color-bg-hover);
+        color: var(--figma-color-text);
+      }
+      .icon-btn.is-danger:hover {
+        background: rgba(239, 68, 68, 0.16);
+        color: #ef4444;
+      }
+      .tree-confirm {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex: 1;
+        min-width: 0;
+        padding: 3px 6px;
+        font-size: 10.5px;
+        color: var(--figma-color-text-secondary);
+      }
+      .tree-confirm span {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .tree-confirm button {
+        flex: 0 0 auto;
+        margin: 0;
+        padding: 2px 7px;
+        border: none;
+        border-radius: 4px;
+        background: var(--figma-color-bg-secondary);
+        color: var(--figma-color-text);
+        cursor: pointer;
+        font: inherit;
+        font-size: 10.5px;
+      }
+      .tree-confirm button.is-danger {
+        background: rgba(239, 68, 68, 0.16);
+        color: #ef4444;
+      }
+      .tree-input {
+        flex: 1;
+        min-width: 0;
+        padding: 3px 6px;
+        border: 1px solid var(--accent);
+        border-radius: 5px;
+        background: var(--figma-color-bg);
+        color: var(--figma-color-text);
+        font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;
+        font-size: 11px;
+      }
+      .tree-input:focus {
+        outline: none;
+        box-shadow: 0 0 0 3px var(--accent-soft);
+      }
+
+      .preview {
+        margin-top: 8px;
+        padding: 7px 10px;
+        border-radius: var(--radius-sm);
+        background: var(--figma-color-bg-secondary);
+        color: var(--figma-color-text-secondary);
+        font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;
+        font-size: 10.5px;
+        line-height: 16px;
+        min-height: 30px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .preview.is-active {
+        color: var(--figma-color-text);
+      }
+
       /* «Как это работает» */
       details {
         margin-top: 14px;
@@ -435,6 +710,15 @@
       >
         Кратность 4
       </button>
+      <button
+        type="button"
+        role="tab"
+        id="tabNames"
+        aria-selected="false"
+        aria-controls="panelNames"
+      >
+        Ренейминг
+      </button>
     </div>
 
     <div
@@ -528,6 +812,78 @@
       </details>
     </div>
 
+    <div id="panelNames" class="panel" role="tabpanel" aria-labelledby="tabNames">
+      <p class="hint">
+        Выделите слои и нажмите тип — плагин переименует их сверху вниз, как
+        в панели Layers. Нумерация всегда с <code>01</code>.
+      </p>
+
+      <input
+        type="search"
+        class="search-input"
+        id="namesSearch"
+        placeholder="Поиск по типам — Eyes, Hair, Dress…"
+        aria-label="Поиск по типам"
+        autocomplete="off"
+      />
+
+      <div class="recent" id="namesRecent">
+        <div class="recent-title">Недавние</div>
+        <div class="chips" id="namesRecentChips"></div>
+      </div>
+
+      <div class="tree" id="namesTree" aria-label="Типы слоёв">
+        <div class="list-header">
+          <span>Типы слоёв</span>
+          <span class="tree-header-right">
+            <span class="tree-count" id="namesSelectionCount">Выделено: 0</span>
+            <button
+              type="button"
+              class="linkish"
+              id="namesEditToggle"
+              aria-pressed="false"
+            >
+              Изменить
+            </button>
+          </span>
+        </div>
+        <div class="tree-editbar" id="namesEditBar">
+          <button type="button" class="linkish" id="namesAddRoot">+ Тип</button>
+          <button type="button" class="linkish" id="namesReset">Сбросить</button>
+          <span class="confirm-text" id="namesEditHint">клик по строке — переименовать</span>
+        </div>
+        <div class="tree-body" id="namesTreeBody" role="tree"></div>
+      </div>
+
+      <div class="preview" id="namesPreview" aria-live="polite"></div>
+      <div class="status" id="namesStatus" role="status"></div>
+
+      <details>
+        <summary>Как это работает</summary>
+        <ul>
+          <li>
+            Порядок — <b>сверху вниз</b> по панели Layers, а не по порядку
+            выделения. Счётчик всегда начинается с <code>01</code> и считает
+            только текущее выделение.
+          </li>
+          <li>
+            Тип-<b>группа</b> (<code>Eyes_</code>) даёт
+            <code>Eyes_01</code>, <code>Eyes_02</code>…
+          </li>
+          <li>
+            Тип-<b>лист</b> (<code>Eyes_01_R_TopLash</code>) — это шаблон:
+            растёт сегмент <code>01</code> →
+            <code>Eyes_02_R_TopLash</code>. Один выделенный слой получит
+            имя ровно как в списке.
+          </li>
+          <li>
+            Наведите на строку — в полосе под списком видно, какие имена
+            получатся. Стрелка слева раскрывает вложенные типы.
+          </li>
+        </ul>
+      </details>
+    </div>
+
     <p id="pluginVersionFooter" class="plugin-version-footer" aria-live="polite">
       Версия: …
     </p>
@@ -535,10 +891,13 @@
     <script>
       const tabRaster = document.getElementById("tabRaster");
       const tabMo4 = document.getElementById("tabMo4");
+      const tabNames = document.getElementById("tabNames");
       const panelRaster = document.getElementById("panelRaster");
       const panelMo4 = document.getElementById("panelMo4");
+      const panelNames = document.getElementById("panelNames");
       const rasterStatusEl = document.getElementById("rasterStatus");
       const mo4StatusEl = document.getElementById("mo4Status");
+      const namesStatusEl = document.getElementById("namesStatus");
       const scaleEl = document.getElementById("scale");
       const originalDispositionEl = document.getElementById("originalDisposition");
       const goRasterEl = document.getElementById("goRaster");
@@ -558,21 +917,29 @@
         return n + " слоёв";
       }
 
+      const TABS = [
+        { name: "raster", tab: tabRaster, panel: panelRaster, status: rasterStatusEl },
+        { name: "mo4", tab: tabMo4, panel: panelMo4, status: mo4StatusEl },
+        { name: "names", tab: tabNames, panel: panelNames, status: namesStatusEl },
+      ];
+
       function setTab(which) {
-        const isRaster = which === "raster";
-        tabRaster.setAttribute("aria-selected", isRaster ? "true" : "false");
-        tabMo4.setAttribute("aria-selected", isRaster ? "false" : "true");
-        panelRaster.classList.toggle("is-active", isRaster);
-        panelMo4.classList.toggle("is-active", !isRaster);
-        if (isRaster) {
-          mo4StatusEl.textContent = "";
-        } else {
-          rasterStatusEl.textContent = "";
+        for (const entry of TABS) {
+          const active = entry.name === which;
+          entry.tab.setAttribute("aria-selected", active ? "true" : "false");
+          entry.panel.classList.toggle("is-active", active);
+          if (!active) {
+            entry.status.textContent = "";
+          }
+        }
+        if (which === "names") {
+          namesSearchEl.focus();
         }
       }
 
-      tabRaster.addEventListener("click", () => setTab("raster"));
-      tabMo4.addEventListener("click", () => setTab("mo4"));
+      for (const entry of TABS) {
+        entry.tab.addEventListener("click", () => setTab(entry.name));
+      }
 
       let originalDisposition = "keep";
       const dispositionRadios = originalDispositionEl.querySelectorAll('[role="radio"]');
@@ -672,11 +1039,15 @@
         }
         pendingUpdateRemoteVersion = remoteVersion;
         updateBannerBodyEl.innerHTML =
-          "Доступна новая версия плагина <strong>" +
+          "Доступна версия <strong>" +
           remoteVersion +
-          "</strong> (у вас " +
+          "</strong>, у вас " +
           pluginCurrentVersion +
-          '). Закройте плагин в Figma, откройте <strong>папку с клоном репозитория</strong> и запустите <code>UPDATE.bat</code>.';
+          ".<br />1. Закройте плагин." +
+          "<br />2. В папке плагина запустите <code>UPDATE.bat</code>." +
+          "<br />3. Откройте плагин заново — внизу должна быть " +
+          remoteVersion +
+          ".";
         updateBannerEl.classList.add("is-visible");
       }
 
@@ -759,6 +1130,556 @@
 
       renderMo4List([]);
 
+      /* ---- Вкладка «Ренейминг» ---- */
+
+      const namesSearchEl = document.getElementById("namesSearch");
+      const namesRecentEl = document.getElementById("namesRecent");
+      const namesRecentChipsEl = document.getElementById("namesRecentChips");
+      const namesTreeEl = document.getElementById("namesTree");
+      const namesTreeBodyEl = document.getElementById("namesTreeBody");
+      const namesSelectionCountEl = document.getElementById("namesSelectionCount");
+      const namesPreviewEl = document.getElementById("namesPreview");
+      const namesEditToggleEl = document.getElementById("namesEditToggle");
+      const namesEditBarEl = document.getElementById("namesEditBar");
+      const namesAddRootEl = document.getElementById("namesAddRoot");
+      const namesResetEl = document.getElementById("namesReset");
+      const namesEditHintEl = document.getElementById("namesEditHint");
+
+      const RECENT_LIMIT = 5;
+      const PREVIEW_IDLE = "Наведите на тип — покажу будущие имена.";
+      const PREVIEW_EDIT =
+        "Правка списка: клик по строке — переименовать, + — вложенный тип.";
+
+      let namePresets = [];
+      let recentTemplates = [];
+      let expandedIds = {};
+      let namesFilter = "";
+      let selectionCount = 0;
+
+      // Режим правки дерева. Обычный клик по строке переименовывает слои,
+      // поэтому редактирование живёт в отдельном режиме — меньше промахов.
+      let isEditingPresets = false;
+      let editingNodeId = null;
+      let pendingAddParentId = undefined;
+      let confirmingDeleteId = null;
+      let confirmingReset = false;
+      let focusAfterRender = null;
+
+      // Зеркало buildNameForIndex из src/domain/layerNamePresets.ts —
+      // правки нужно вносить в обоих местах.
+      function previewName(template, index) {
+        const value = index + 1;
+        const counter = value < 10 ? "0" + value : String(value);
+        if (template.slice(-1) === "_") {
+          return template + counter;
+        }
+        const segments = template.split("_");
+        const counterAt = segments.indexOf("01");
+        if (counterAt === -1) {
+          return template + "_" + counter;
+        }
+        segments[counterAt] = counter;
+        return segments.join("_");
+      }
+
+      function previewLine(template) {
+        const count = selectionCount;
+        if (count === 0) {
+          return "Нет выделения · будет " + previewName(template, 0) + ", " +
+            previewName(template, 1) + " …";
+        }
+        if (count === 1) {
+          return previewName(template, 0);
+        }
+        if (count === 2) {
+          return previewName(template, 0) + ", " + previewName(template, 1);
+        }
+        return (
+          previewName(template, 0) +
+          ", " +
+          previewName(template, 1) +
+          " … " +
+          previewName(template, count - 1)
+        );
+      }
+
+      function setPreview(template) {
+        if (isEditingPresets) {
+          namesPreviewEl.textContent = PREVIEW_EDIT;
+          namesPreviewEl.classList.remove("is-active");
+          return;
+        }
+        if (!template) {
+          namesPreviewEl.textContent = PREVIEW_IDLE;
+          namesPreviewEl.classList.remove("is-active");
+          return;
+        }
+        namesPreviewEl.textContent = previewLine(template);
+        namesPreviewEl.classList.add("is-active");
+      }
+
+      function setSelectionCount(count) {
+        selectionCount = count;
+        namesSelectionCountEl.textContent = "Выделено: " + count;
+        namesSelectionCountEl.classList.toggle("is-ready", count > 0);
+        // В режиме правки выделение не нужно — не приглушаем дерево.
+        namesTreeEl.classList.toggle(
+          "is-idle",
+          count === 0 && !isEditingPresets
+        );
+      }
+
+      function matchesFilter(node, query) {
+        if (node.template.toLowerCase().indexOf(query) !== -1) {
+          return true;
+        }
+        const children = node.children || [];
+        for (const child of children) {
+          if (matchesFilter(child, query)) {
+            return true;
+          }
+        }
+        return false;
+      }
+
+      function createRowShell(depth) {
+        const row = document.createElement("div");
+        row.className = "tree-row";
+        row.style.setProperty("--depth", String(depth));
+        return row;
+      }
+
+      function createSpacer() {
+        const spacer = document.createElement("button");
+        spacer.type = "button";
+        spacer.className = "tree-toggle is-leaf";
+        spacer.tabIndex = -1;
+        spacer.setAttribute("aria-hidden", "true");
+        return spacer;
+      }
+
+      function createIconButton(glyph, label, onClick, danger) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "icon-btn" + (danger ? " is-danger" : "");
+        button.textContent = glyph;
+        button.title = label;
+        button.setAttribute("aria-label", label);
+        button.addEventListener("click", (event) => {
+          event.stopPropagation();
+          onClick();
+        });
+        return button;
+      }
+
+      /** Строка-инпут: инлайн-переименование и добавление нового типа. */
+      function createInputRow(depth, value, onCommit, onCancel) {
+        const row = createRowShell(depth);
+        row.appendChild(createSpacer());
+
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "tree-input";
+        input.value = value;
+        input.spellcheck = false;
+        input.autocomplete = "off";
+
+        let settled = false;
+        const commit = () => {
+          if (settled) return;
+          settled = true;
+          onCommit(input.value);
+        };
+        const cancel = () => {
+          if (settled) return;
+          settled = true;
+          onCancel();
+        };
+
+        input.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            commit();
+          } else if (event.key === "Escape") {
+            event.preventDefault();
+            cancel();
+          }
+        });
+        input.addEventListener("blur", commit);
+
+        row.appendChild(input);
+        focusAfterRender = input;
+        return row;
+      }
+
+      function createDeleteConfirmRow(node, depth) {
+        const row = createRowShell(depth);
+        row.appendChild(createSpacer());
+
+        const wrap = document.createElement("div");
+        wrap.className = "tree-confirm";
+        const label = document.createElement("span");
+        const nested = countPresetNodes(node.children || []);
+        label.textContent = nested > 0
+          ? "Удалить с вложенными (" + nested + ")?"
+          : "Удалить?";
+        wrap.appendChild(label);
+
+        const yes = document.createElement("button");
+        yes.type = "button";
+        yes.className = "is-danger";
+        yes.textContent = "Удалить";
+        yes.addEventListener("click", () => {
+          confirmingDeleteId = null;
+          postToPlugin({ type: "removePreset", id: node.id });
+        });
+
+        const no = document.createElement("button");
+        no.type = "button";
+        no.textContent = "Отмена";
+        no.addEventListener("click", () => {
+          confirmingDeleteId = null;
+          renderNamesTree();
+        });
+
+        wrap.appendChild(yes);
+        wrap.appendChild(no);
+        row.appendChild(wrap);
+        return row;
+      }
+
+      function createTreeRow(node, depth, expanded) {
+        const children = node.children || [];
+        const hasChildren = children.length > 0;
+        const row = createRowShell(depth);
+
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = hasChildren ? "tree-toggle" : "tree-toggle is-leaf";
+        toggle.tabIndex = hasChildren ? 0 : -1;
+        if (hasChildren) {
+          toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+          toggle.setAttribute(
+            "aria-label",
+            (expanded ? "Свернуть " : "Раскрыть ") + node.template
+          );
+          toggle.addEventListener("click", () => {
+            expandedIds[node.id] = !expanded;
+            renderNamesTree();
+          });
+        } else {
+          toggle.setAttribute("aria-hidden", "true");
+        }
+
+        const isGroup = node.template.slice(-1) === "_";
+        const apply = document.createElement("button");
+        apply.type = "button";
+        apply.className = "tree-apply " + (isGroup ? "is-group" : "is-leaf");
+        apply.textContent = node.template;
+        if (isEditingPresets) {
+          apply.title = "Переименовать тип";
+          apply.addEventListener("click", () => startRenamePreset(node.id));
+        } else {
+          apply.title =
+            "Переименовать выделение → " + previewName(node.template, 0);
+          apply.addEventListener("click", () => applyNamePreset(node.template));
+          apply.addEventListener("mouseenter", () => setPreview(node.template));
+          apply.addEventListener("focus", () => setPreview(node.template));
+          apply.addEventListener("mouseleave", () => setPreview(""));
+          apply.addEventListener("blur", () => setPreview(""));
+        }
+
+        row.appendChild(toggle);
+        row.appendChild(apply);
+
+        const actions = document.createElement("div");
+        actions.className = "tree-actions";
+        actions.appendChild(
+          createIconButton("+", "Добавить вложенный тип", () =>
+            startAddPreset(node.id)
+          )
+        );
+        actions.appendChild(
+          createIconButton("↑", "Переместить вверх", () =>
+            postToPlugin({ type: "movePreset", id: node.id, direction: "up" })
+          )
+        );
+        actions.appendChild(
+          createIconButton("↓", "Переместить вниз", () =>
+            postToPlugin({ type: "movePreset", id: node.id, direction: "down" })
+          )
+        );
+        actions.appendChild(
+          createIconButton(
+            "×",
+            "Удалить тип",
+            () => {
+              confirmingDeleteId = node.id;
+              renderNamesTree();
+            },
+            true
+          )
+        );
+        row.appendChild(actions);
+        return row;
+      }
+
+      function countPresetNodes(nodes) {
+        let total = 0;
+        for (const node of nodes) {
+          total++;
+          total += countPresetNodes(node.children || []);
+        }
+        return total;
+      }
+
+      function renderNamesTree() {
+        const query = namesFilter.trim().toLowerCase();
+        namesTreeBodyEl.innerHTML = "";
+        focusAfterRender = null;
+        let rendered = 0;
+
+        const walk = (nodes, depth) => {
+          for (const node of nodes) {
+            if (query && !matchesFilter(node, query)) {
+              continue;
+            }
+            const children = node.children || [];
+            const expanded = query ? true : Boolean(expandedIds[node.id]);
+
+            if (editingNodeId === node.id) {
+              namesTreeBodyEl.appendChild(
+                createInputRow(
+                  depth,
+                  node.template,
+                  (value) => commitRenamePreset(node.id, value),
+                  () => {
+                    editingNodeId = null;
+                    renderNamesTree();
+                  }
+                )
+              );
+            } else if (confirmingDeleteId === node.id) {
+              namesTreeBodyEl.appendChild(createDeleteConfirmRow(node, depth));
+            } else {
+              namesTreeBodyEl.appendChild(createTreeRow(node, depth, expanded));
+            }
+            rendered++;
+
+            if (pendingAddParentId === node.id) {
+              namesTreeBodyEl.appendChild(
+                createInputRow(
+                  depth + 1,
+                  "",
+                  (value) => commitAddPreset(node.id, value),
+                  cancelAddPreset
+                )
+              );
+            }
+            if (children.length > 0 && expanded) {
+              walk(children, depth + 1);
+            }
+          }
+        };
+        walk(namePresets, 0);
+
+        if (pendingAddParentId === null) {
+          namesTreeBodyEl.appendChild(
+            createInputRow(0, "", (value) => commitAddPreset(null, value), cancelAddPreset)
+          );
+          rendered++;
+        }
+
+        if (rendered === 0) {
+          const empty = document.createElement("div");
+          empty.className = "tree-empty";
+          empty.textContent = namePresets.length === 0
+            ? "Загружаю типы…"
+            : "Ничего не нашлось.";
+          namesTreeBodyEl.appendChild(empty);
+        }
+
+        if (focusAfterRender) {
+          const input = focusAfterRender;
+          focusAfterRender = null;
+          input.focus();
+          input.select();
+        }
+      }
+
+      /* Правка дерева: намерение уходит в main, оттуда приходит новое дерево. */
+
+      function setEditingPresets(editing) {
+        isEditingPresets = editing;
+        editingNodeId = null;
+        pendingAddParentId = undefined;
+        confirmingDeleteId = null;
+        confirmingReset = false;
+        namesTreeEl.classList.toggle("is-editing", editing);
+        namesEditToggleEl.textContent = editing ? "Готово" : "Изменить";
+        namesEditToggleEl.setAttribute("aria-pressed", editing ? "true" : "false");
+        renderResetControl();
+        renderRecent();
+        setSelectionCount(selectionCount);
+        setPreview("");
+        renderNamesTree();
+      }
+
+      function startRenamePreset(id) {
+        editingNodeId = id;
+        pendingAddParentId = undefined;
+        confirmingDeleteId = null;
+        renderNamesTree();
+      }
+
+      function findPresetNode(nodes, id) {
+        for (const node of nodes) {
+          if (node.id === id) {
+            return node;
+          }
+          const found = findPresetNode(node.children || [], id);
+          if (found) {
+            return found;
+          }
+        }
+        return null;
+      }
+
+      function commitRenamePreset(id, value) {
+        const template = value.trim();
+        const current = findPresetNode(namePresets, id);
+        editingNodeId = null;
+        if (template.length === 0) {
+          namesStatusEl.textContent = "Пустое имя — оставил как было.";
+          renderNamesTree();
+          return;
+        }
+        // Инпут закрывается и по blur — «переименование» в то же имя не шлём.
+        if (current && current.template === template) {
+          renderNamesTree();
+          return;
+        }
+        postToPlugin({ type: "renamePreset", id, template });
+      }
+
+      function startAddPreset(parentId) {
+        // Новый тип может не попасть под фильтр — показываем весь список.
+        namesFilter = "";
+        namesSearchEl.value = "";
+        pendingAddParentId = parentId;
+        editingNodeId = null;
+        confirmingDeleteId = null;
+        if (parentId) {
+          expandedIds[parentId] = true;
+        }
+        renderNamesTree();
+      }
+
+      function cancelAddPreset() {
+        pendingAddParentId = undefined;
+        renderNamesTree();
+      }
+
+      function commitAddPreset(parentId, value) {
+        const template = value.trim();
+        pendingAddParentId = undefined;
+        if (template.length === 0) {
+          renderNamesTree();
+          return;
+        }
+        postToPlugin({ type: "addPreset", parentId, template });
+      }
+
+      function renderResetControl() {
+        namesResetEl.textContent = confirmingReset ? "Точно сбросить?" : "Сбросить";
+        namesEditHintEl.textContent = confirmingReset
+          ? "правки будут потеряны"
+          : "клик по строке — переименовать";
+      }
+
+      namesEditToggleEl.addEventListener("click", () => {
+        setEditingPresets(!isEditingPresets);
+      });
+
+      namesAddRootEl.addEventListener("click", () => {
+        confirmingReset = false;
+        renderResetControl();
+        startAddPreset(null);
+      });
+
+      namesResetEl.addEventListener("click", () => {
+        if (!confirmingReset) {
+          confirmingReset = true;
+          renderResetControl();
+          return;
+        }
+        confirmingReset = false;
+        renderResetControl();
+        postToPlugin({ type: "resetPresets" });
+      });
+
+      function renderRecent() {
+        namesRecentChipsEl.innerHTML = "";
+        // В режиме правки чипсы переименовывали бы слои — прячем их.
+        namesRecentEl.classList.toggle(
+          "is-visible",
+          recentTemplates.length > 0 && !isEditingPresets
+        );
+        for (const template of recentTemplates) {
+          const chip = document.createElement("button");
+          chip.type = "button";
+          chip.className = "chip";
+          chip.textContent = template;
+          chip.title = "Переименовать выделение → " + previewName(template, 0);
+          chip.addEventListener("click", () => applyNamePreset(template));
+          chip.addEventListener("mouseenter", () => setPreview(template));
+          chip.addEventListener("focus", () => setPreview(template));
+          chip.addEventListener("mouseleave", () => setPreview(""));
+          chip.addEventListener("blur", () => setPreview(""));
+          namesRecentChipsEl.appendChild(chip);
+        }
+      }
+
+      function rememberTemplate(template) {
+        recentTemplates = [template].concat(
+          recentTemplates.filter((item) => item !== template)
+        );
+        if (recentTemplates.length > RECENT_LIMIT) {
+          recentTemplates = recentTemplates.slice(0, RECENT_LIMIT);
+        }
+        renderRecent();
+        postToPlugin({
+          type: "setRecentNamePresets",
+          templates: recentTemplates,
+        });
+      }
+
+      function applyNamePreset(template) {
+        if (isEditingPresets) {
+          return;
+        }
+        if (selectionCount === 0) {
+          namesStatusEl.textContent =
+            "Выделите слои на канвасе — переименую их сверху вниз.";
+          return;
+        }
+        namesStatusEl.textContent = "Переименование…";
+        rememberTemplate(template);
+        postToPlugin({ type: "renameLayers", template });
+      }
+
+      namesSearchEl.addEventListener("input", () => {
+        namesFilter = namesSearchEl.value;
+        renderNamesTree();
+      });
+
+      renderResetControl();
+      setPreview("");
+      setSelectionCount(0);
+      renderNamesTree();
+      renderRecent();
+      postToPlugin({ type: "getRecentNamePresets" });
+
       goRasterEl.addEventListener("click", () => {
         rasterStatusEl.textContent = "Обработка…";
         goRasterEl.disabled = true;
@@ -800,6 +1721,50 @@
           if (nextVersion.length > 0 && nextVersion !== previousVersion) {
             postToPlugin({ type: "getUpdateBannerDismissed" });
           }
+          return;
+        }
+        if (msg.type === "layerNamePresets") {
+          if (Array.isArray(msg.presets) && msg.presets.length > 0) {
+            namePresets = msg.presets;
+            editingNodeId = null;
+            pendingAddParentId = undefined;
+            confirmingDeleteId = null;
+            renderNamesTree();
+          }
+          if (msg.notice) {
+            namesStatusEl.textContent = msg.notice;
+          }
+          return;
+        }
+        if (msg.type === "selectionChanged") {
+          setSelectionCount(
+            typeof msg.count === "number" && msg.count > 0 ? msg.count : 0
+          );
+          return;
+        }
+        if (msg.type === "recentNamePresets") {
+          recentTemplates = Array.isArray(msg.templates)
+            ? msg.templates.slice(0, RECENT_LIMIT)
+            : [];
+          renderRecent();
+          return;
+        }
+        if (msg.type === "renameLayersResult") {
+          const names = Array.isArray(msg.names) ? msg.names : [];
+          if (!msg.ok && names.length === 0) {
+            namesStatusEl.textContent = msg.error || "Что-то пошло не так.";
+            return;
+          }
+          let text = "Готово — переименовано " + pluralLayers(msg.renamed) + ".";
+          if (names.length === 1) {
+            text += "\n" + names[0];
+          } else if (names.length > 1) {
+            text += "\n" + names[0] + " … " + names[names.length - 1];
+          }
+          if (msg.error) {
+            text += "\n" + msg.error;
+          }
+          namesStatusEl.textContent = text;
           return;
         }
         if (msg.type === "updateBannerDismissed") {

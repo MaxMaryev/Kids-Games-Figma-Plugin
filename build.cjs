@@ -10,10 +10,14 @@ const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
 const pluginVersion =
   typeof packageJson.version === "string" ? packageJson.version : "0.0.0";
 
+// Переопределение нужно verify.cjs: собрать во временный файл и сравнить
+// с закоммиченным code.js, не трогая рабочую копию.
+const outfile = process.env.KGP_BUILD_OUTFILE || "code.js";
+
 const config = {
   entryPoints: [path.join(__dirname, "src", "main.ts")],
   bundle: true,
-  outfile: "code.js",
+  outfile,
   target: "es2017",
   platform: "neutral",
   define: {
