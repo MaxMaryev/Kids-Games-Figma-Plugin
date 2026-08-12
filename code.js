@@ -579,16 +579,43 @@ function alignNodeToWorldPoint(node, worldX, worldY, passes = 3) {
   }
   return report;
 }
-function placeRectangleAtDocumentBox(rectangle, parent, documentBox) {
-  const parentBox = "absoluteBoundingBox" in parent ? parent.absoluteBoundingBox : null;
-  if (parentBox) {
-    rectangle.x = documentBox.x - parentBox.x;
-    rectangle.y = documentBox.y - parentBox.y;
-  } else {
-    rectangle.x = documentBox.x;
-    rectangle.y = documentBox.y;
+function worldDimsToLocalDims(parentTransform, worldWidth, worldHeight) {
+  if (!parentTransform) {
+    return { width: worldWidth, height: worldHeight, exact: true };
   }
-  rectangle.resize(documentBox.width, documentBox.height);
+  const [[a, b], [c, d]] = parentTransform;
+  const p = Math.abs(a);
+  const q = Math.abs(b);
+  const r = Math.abs(c);
+  const s = Math.abs(d);
+  const det = p * s - q * r;
+  const sx = Math.sqrt(a * a + c * c);
+  const sy = Math.sqrt(b * b + d * d);
+  if (Math.abs(det) < 1e-6 * Math.max(1e-12, sx * sy)) {
+    return {
+      width: sx < 1e-10 ? worldWidth : worldWidth / sx,
+      height: sy < 1e-10 ? worldHeight : worldHeight / sy,
+      exact: false
+    };
+  }
+  return {
+    width: (s * worldWidth - q * worldHeight) / det,
+    height: (p * worldHeight - r * worldWidth) / det,
+    exact: true
+  };
+}
+function placeRectangleAtDocumentBox(rectangle, parent, documentBox) {
+  const parentTransform = "absoluteTransform" in parent ? parent.absoluteTransform : null;
+  const localDims = worldDimsToLocalDims(
+    parentTransform,
+    documentBox.width,
+    documentBox.height
+  );
+  rectangle.resize(
+    Math.max(0.01, localDims.width),
+    Math.max(0.01, localDims.height)
+  );
+  alignNodeToWorldPoint(rectangle, documentBox.x, documentBox.y);
 }
 
 // src/features/multipleOfFourPadding.ts
@@ -626,31 +653,6 @@ function getExistingMo4WrapperForNode(node) {
     return parent;
   }
   return null;
-}
-function worldDimsToLocalDims(parentTransform, worldWidth, worldHeight) {
-  if (!parentTransform) {
-    return { width: worldWidth, height: worldHeight, exact: true };
-  }
-  const [[a, b], [c, d]] = parentTransform;
-  const p = Math.abs(a);
-  const q = Math.abs(b);
-  const r = Math.abs(c);
-  const s = Math.abs(d);
-  const det = p * s - q * r;
-  const sx = Math.sqrt(a * a + c * c);
-  const sy = Math.sqrt(b * b + d * d);
-  if (Math.abs(det) < 1e-6 * Math.max(1e-12, sx * sy)) {
-    return {
-      width: sx < 1e-10 ? worldWidth : worldWidth / sx,
-      height: sy < 1e-10 ? worldHeight : worldHeight / sy,
-      exact: false
-    };
-  }
-  return {
-    width: (s * worldWidth - q * worldHeight) / det,
-    height: (p * worldHeight - r * worldWidth) / det,
-    exact: true
-  };
 }
 function copyLayoutSlotFromNodeToWrapper(source, wrapper, outerParent) {
   if (!parentHasAutoLayout(outerParent)) {
@@ -3431,7 +3433,7 @@ function postSelectionToUi() {
   });
 }
 function postBootstrapToUi() {
-  figma.ui.postMessage({ type: "pluginVersion", version: "1.3.2" });
+  figma.ui.postMessage({ type: "pluginVersion", version: "1.3.3" });
   postSelectionToUi();
   if (presetTreeLoaded) {
     postPresetTreeToUi();
