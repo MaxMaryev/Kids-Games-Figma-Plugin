@@ -1,12 +1,5 @@
 import { analyzePixelDimensions } from "../domain/multipleOfFour";
-
-function logJSON(label: string, payload: unknown): void {
-  try {
-    console.log(label, JSON.stringify(payload));
-  } catch {
-    console.log(label, payload);
-  }
-}
+import { alignNodeToWorldPoint, worldVectorToLocal } from "../figma/geometry";
 import {
   canInsertIntoParent,
   getAbsoluteRenderBounds,
@@ -18,6 +11,27 @@ import {
   MO4_WRAPPER_PLUGIN_VALUE,
   NO4_CHILD_NAME_PREFIX,
 } from "./multipleOfFourPadding";
+
+/** Лог одного запуска: уходит и в консоль, и в UI (панель «Диагностика»). */
+const DEBUG_LOG_LIMIT = 400;
+let debugLog: string[] = [];
+
+function resetDebugLog(): void {
+  debugLog = [];
+}
+
+function logJSON(label: string, payload: unknown): void {
+  let text: string;
+  try {
+    text = `${label} ${JSON.stringify(payload)}`;
+  } catch {
+    text = `${label} <не сериализуется>`;
+  }
+  if (debugLog.length < DEBUG_LOG_LIMIT) {
+    debugLog.push(text);
+  }
+  console.log(text);
+}
 
 function isMo4WrapperFrame(node: BaseNode): boolean {
   return (
@@ -38,58 +52,48 @@ function getExistingMo4WrapperForNode(node: SceneNode): FrameNode | null {
 }
 
 /**
- * Converts world-space axis-aligned bounding-box dimensions to the local dimensions
- * needed by resizeWithoutConstraints so that the node's world AABB equals (worldWidth × worldHeight).
- * Handles parent rotation and non-uniform scale; assumes no shear.
+ * Локальные размеры, при которых мировой AABB узла станет (worldWidth × worldHeight).
+ * Мировой AABB локального прямоугольника (lw, lh) в системе родителя:
+ *   width  = |a|·lw + |b|·lh
+ *   height = |c|·lw + |d|·lh
+ * Отсюда обычное решение системы 2×2 — учитывает поворот и неравномерный масштаб.
+ * Возвращает знаковые значения: функция используется и для добора остатка.
+ * exact = false, когда система вырождена (поворот ≈45° при равном масштабе: мировой
+ * AABB там всегда квадратный, и неквадратная цель недостижима в принципе).
  */
 function worldDimsToLocalDims(
   parentTransform: Transform | null,
   worldWidth: number,
   worldHeight: number
-): { width: number; height: number } {
-  if (!parentTransform) return { width: worldWidth, height: worldHeight };
+): { width: number; height: number; exact: boolean } {
+  if (!parentTransform) {
+    return { width: worldWidth, height: worldHeight, exact: true };
+  }
 
   const [[a, b], [c, d]] = parentTransform;
-  const sx = Math.sqrt(a * a + c * c); // scale along local x-axis
-  const sy = Math.sqrt(b * b + d * d); // scale along local y-axis
+  const p = Math.abs(a);
+  const q = Math.abs(b);
+  const r = Math.abs(c);
+  const s = Math.abs(d);
+  const det = p * s - q * r;
+  const sx = Math.sqrt(a * a + c * c);
+  const sy = Math.sqrt(b * b + d * d);
 
-  if (sx < 1e-10 || sy < 1e-10) return { width: worldWidth, height: worldHeight };
-
-  const cosT = Math.abs(a / sx); // |cos θ|
-  const sinT = Math.abs(c / sx); // |sin θ|
-  const cos2T = cosT * cosT - sinT * sinT; // cos(2θ)
-
-  if (Math.abs(cos2T) < 1e-6) {
-    // Near 45° / 135° — system is indeterminate; swap heuristic
-    return { width: worldHeight / sy, height: worldWidth / sx };
+  // Порог берём относительно масштаба: det = sx·sy·cos2θ, и абсолютное значение
+  // само по себе ничего не говорит о том, насколько система вырождена.
+  if (Math.abs(det) < 1e-6 * Math.max(1e-12, sx * sy)) {
+    // Однозначного решения нет — раскладываем по осям масштаба и помечаем как неточное.
+    return {
+      width: sx < 1e-10 ? worldWidth : worldWidth / sx,
+      height: sy < 1e-10 ? worldHeight : worldHeight / sy,
+      exact: false,
+    };
   }
 
   return {
-    width: Math.abs((cosT * worldWidth - sinT * worldHeight) / (sx * cos2T)),
-    height: Math.abs((cosT * worldHeight - sinT * worldWidth) / (sy * cos2T)),
-  };
-}
-
-/**
- * Converts a world-space point to the local coordinate space of a parent node,
- * correctly handling rotation and scale via the inverse of absoluteTransform.
- */
-function worldToLocal(
-  parentTransform: Transform,
-  worldX: number,
-  worldY: number
-): { x: number; y: number } {
-  const [[a, b, tx], [c, d, ty]] = parentTransform;
-  const det = a * d - b * c;
-  if (Math.abs(det) < 1e-10) {
-    // Degenerate transform (collapsed node), fall back to translation only.
-    return { x: worldX - tx, y: worldY - ty };
-  }
-  const dx = worldX - tx;
-  const dy = worldY - ty;
-  return {
-    x: (d * dx - b * dy) / det,
-    y: (a * dy - c * dx) / det,
+    width: (s * worldWidth - q * worldHeight) / det,
+    height: (p * worldHeight - r * worldWidth) / det,
+    exact: true,
   };
 }
 
@@ -119,8 +123,11 @@ function copyLayoutSlotFromNodeToWrapper(
   }
 }
 
-/** Создаёт обёртку поверх node в его родителе, занимая ту же локальную позицию. */
-function wrapSceneNodeInFixFrame(node: SceneNode): FrameNode {
+/**
+ * Создаёт обёртку поверх node в его родителе и сразу ставит её на место исходного слоя.
+ * sourceBox — absoluteBoundingBox узла, снятый до любых изменений.
+ */
+function wrapSceneNodeInFixFrame(node: SceneNode, sourceBox: Rect): FrameNode {
   const parent = node.parent;
   if (!canInsertIntoParent(parent)) {
     throw new Error("Нельзя вставить обёртку в родителя");
@@ -131,8 +138,6 @@ function wrapSceneNodeInFixFrame(node: SceneNode): FrameNode {
 
   const outerParent = parent as SceneNode | PageNode;
   const index = parent.children.indexOf(node);
-  const localX = node.x;
-  const localY = node.y;
   const localWidth = node.width;
   const localHeight = node.height;
   const originalNodeName = node.name;
@@ -155,15 +160,43 @@ function wrapSceneNodeInFixFrame(node: SceneNode): FrameNode {
   );
   copyLayoutSlotFromNodeToWrapper(node, wrapper, outerParent);
 
-  // Перекладываем узел внутрь обёртки. Figma сама пересчитает relativeTransform
-  // так, чтобы абсолютная позиция/поворот узла сохранились.
-  // НЕЛЬЗЯ вручную делать node.x = 0; node.y = 0 — для повёрнутых/масштабированных
-  // нод это сломало бы визуальную позицию (x/y — это пивот, а не визуальный угол).
+  // Свежесозданный фрейм встаёт в локальные (0,0) родителя. Ставим его на место
+  // исходного слоя сразу же: иначе он раздувает bbox родителя-группы (её origin
+  // тут же уезжает, обесценивая посчитанные координаты), а любой ранний выход
+  // ниже по коду оставил бы фрейм вдалеке от картинки. При auto-layout позицией
+  // владеет раскладка — не вмешиваемся.
+  if (!parentHasAutoLayout(outerParent)) {
+    const wrapperBefore = wrapper.absoluteBoundingBox;
+    const report = alignNodeToWorldPoint(wrapper, sourceBox.x, sourceBox.y);
+    logJSON("[mo4] wrap: align wrapper to source", {
+      sourceBox,
+      wrapperBefore,
+      report,
+    });
+  }
+  const nodeBoxBeforeAppend = node.absoluteBoundingBox;
+
+  // appendChild сохраняет relativeTransform, а НЕ абсолютную позицию: узел остаётся
+  // с теми же локальными x/y и уезжает на разницу origin'ов старого родителя и обёртки.
+  // Поэтому возвращаем его на место замером. Обёртка не повёрнута относительно
+  // родителя, так что мировая ориентация узла не меняется и достаточно совместить
+  // левый верхний угол bbox. Вручную ставить node.x = 0 нельзя — для повёрнутых нод
+  // x/y это пивот, а не визуальный угол.
   wrapper.appendChild(node);
   node.name = `${NO4_CHILD_NAME_PREFIX}${baseNameForWrapper}`;
-  // localX, localY больше не используются — оставлены только для возможной отладки.
-  void localX;
-  void localY;
+  const nodeBoxAfterAppend = node.absoluteBoundingBox;
+  const restoreReport = nodeBoxBeforeAppend
+    ? alignNodeToWorldPoint(node, nodeBoxBeforeAppend.x, nodeBoxBeforeAppend.y)
+    : null;
+  logJSON("[mo4] wrap: after appendChild", {
+    nodeBoxBeforeAppend,
+    nodeBoxAfterAppend,
+    restoreReport,
+    nodeBoxRestored: node.absoluteBoundingBox,
+    nodeLocal: { x: node.x, y: node.y, w: node.width, h: node.height },
+    wrapperBox: wrapper.absoluteBoundingBox,
+    wrapperLocal: { x: wrapper.x, y: wrapper.y, w: wrapper.width, h: wrapper.height },
+  });
 
   return wrapper;
 }
@@ -211,78 +244,123 @@ function applyPaddingToWrapperFrame(
 
   const outer = wrapper.parent;
   if (!canInsertIntoParent(outer)) {
+    logJSON("[mo4] applyPadding: bad outer parent, skip", {});
     return false;
   }
   const outerScene = outer as SceneNode | PageNode;
+  const autoLayoutParent = parentHasAutoLayout(outerScene);
 
-  // absoluteTransform is available on all SceneNodes; PAGE children live in world space.
-  const parentTransform: Transform | null =
-    "absoluteTransform" in outerScene ? outerScene.absoluteTransform : null;
-  // parentOrigin is the translation part only — kept for logging.
-  const parentOrigin = parentTransform
-    ? { x: parentTransform[0][2], y: parentTransform[1][2] }
-    : outerScene.type === "PAGE"
-      ? { x: 0, y: 0 }
-      : null;
-  if (!parentOrigin) {
-    return false;
-  }
-
-  // Сдвигаем детей на дельту перемещения обёртки в её локальной системе координат.
-  // Это сохраняет абсолютную позицию каждого ребёнка независимо от поворота/scale.
-  const oldWrapperX = wrapper.x;
-  const oldWrapperY = wrapper.y;
-  const childSnap: Array<{ node: SceneNode; x: number; y: number }> = [];
+  // Позиции детей снимаем в мировых координатах: локальные x/y недостоверны, если
+  // родитель — группа, у которой origin пересчитывается на каждое изменение bbox.
+  const childSnap: Array<{ node: SceneNode; worldX: number; worldY: number }> = [];
   for (const child of wrapper.children) {
+    const scene = child as SceneNode;
+    const box = scene.absoluteBoundingBox;
     childSnap.push({
-      node: child as SceneNode,
-      x: child.x,
-      y: child.y,
+      node: scene,
+      worldX: box ? box.x : Number.NaN,
+      worldY: box ? box.y : Number.NaN,
     });
   }
+  const wrapperBoxBefore = wrapper.absoluteBoundingBox;
+
   logJSON("[mo4] applyPadding: plan", {
-    parentOrigin,
     expandedDocumentRect,
     padLeft,
     padTop,
-    parentAutolayout: parentHasAutoLayout(outerScene),
-    oldWrapperLocal: { x: oldWrapperX, y: oldWrapperY },
-    childSnap: childSnap.map((c) => ({ name: c.node.name, x: c.x, y: c.y })),
+    parentType: outerScene.type,
+    parentAutolayout: autoLayoutParent,
+    wrapperBoxBefore,
+    childSnap: childSnap.map((c) => ({ name: c.node.name, worldX: c.worldX, worldY: c.worldY })),
   });
 
+  // Матрицу родителя читаем непосредственно перед использованием — она протухает
+  // после каждого изменения детей группы.
+  const parentTransform: Transform | null =
+    "absoluteTransform" in outerScene ? outerScene.absoluteTransform : null;
   const localDims = worldDimsToLocalDims(
     parentTransform,
     expandedDocumentRect.width,
     expandedDocumentRect.height
   );
-  wrapper.resizeWithoutConstraints(localDims.width, localDims.height);
-  if (!parentHasAutoLayout(outerScene)) {
-    // worldToLocal maps a world point to the frame's local *origin*. But the frame's
-    // axis-aligned bounding box (AABB) top-left is generally not the same as its origin
-    // when the parent has rotation. We compute the offset from origin→AABB-top-left and
-    // subtract it so the AABB aligns with expandedDocumentRect.
-    let targetWorldX = expandedDocumentRect.x;
-    let targetWorldY = expandedDocumentRect.y;
-    if (parentTransform) {
-      const [[a, b], [c, d]] = parentTransform;
-      const lw = localDims.width;
-      const lh = localDims.height;
-      // Minimum x/y offsets of the four rotated corners relative to the origin.
-      targetWorldX -= Math.min(0, a * lw, b * lh, a * lw + b * lh);
-      targetWorldY -= Math.min(0, c * lw, d * lh, c * lw + d * lh);
-    }
-    const localPos = parentTransform
-      ? worldToLocal(parentTransform, targetWorldX, targetWorldY)
-      : { x: targetWorldX, y: targetWorldY }; // PAGE: world === local
-    wrapper.x = localPos.x;
-    wrapper.y = localPos.y;
-  }
-  const dx = wrapper.x - oldWrapperX;
-  const dy = wrapper.y - oldWrapperY;
+  wrapper.resizeWithoutConstraints(
+    Math.max(0.01, localDims.width),
+    Math.max(0.01, localDims.height)
+  );
 
-  for (const { node, x, y } of childSnap) {
-    node.x = x - dx;
-    node.y = y - dy;
+  // Проверочный проход: сверяем фактический мировой размер и добираем остаток
+  // тем же решением, но уже по свежей матрице.
+  const measured = localDims.exact ? wrapper.absoluteBoundingBox : null;
+  if (measured) {
+    const residualW = expandedDocumentRect.width - measured.width;
+    const residualH = expandedDocumentRect.height - measured.height;
+    if (Math.abs(residualW) > 0.01 || Math.abs(residualH) > 0.01) {
+      const freshTransform: Transform | null =
+        "absoluteTransform" in outerScene ? outerScene.absoluteTransform : null;
+      const correction = worldDimsToLocalDims(
+        freshTransform,
+        residualW,
+        residualH
+      );
+      logJSON("[mo4] applyPadding: size correction", {
+        measured: { w: measured.width, h: measured.height },
+        residualW,
+        residualH,
+        correction,
+      });
+      if (correction.exact) {
+        wrapper.resizeWithoutConstraints(
+          Math.max(0.01, wrapper.width + correction.width),
+          Math.max(0.01, wrapper.height + correction.height)
+        );
+      }
+    }
+  }
+
+  if (!autoLayoutParent) {
+    const wrapperBoxAfterResize = wrapper.absoluteBoundingBox;
+    const wrapperReport = alignNodeToWorldPoint(
+      wrapper,
+      expandedDocumentRect.x,
+      expandedDocumentRect.y
+    );
+    logJSON("[mo4] applyPadding: align wrapper", {
+      wrapperBoxAfterResize,
+      report: wrapperReport,
+    });
+    // Обёртка переехала — возвращаем каждого ребёнка в его исходную мировую точку.
+    for (const { node, worldX, worldY } of childSnap) {
+      if (Number.isNaN(worldX) || Number.isNaN(worldY)) {
+        logJSON("[mo4] applyPadding: child без bbox, не двигаем", { name: node.name });
+        continue;
+      }
+      const boxBeforeRestore = node.absoluteBoundingBox;
+      const localBeforeRestore = { x: node.x, y: node.y };
+      const childReport = alignNodeToWorldPoint(node, worldX, worldY);
+      logJSON("[mo4] applyPadding: restore child", {
+        name: node.name,
+        type: node.type,
+        boxBeforeRestore,
+        localBeforeRestore,
+        report: childReport,
+        localAfterRestore: { x: node.x, y: node.y },
+      });
+    }
+  } else {
+    // Позицией обёртки владеет auto-layout, поэтому держим содержимое в её локальных
+    // координатах: контент должен отступить от края фрейма ровно на паддинг.
+    const anchorX = wrapperBoxBefore ? wrapperBoxBefore.x : renderBounds.x;
+    const anchorY = wrapperBoxBefore ? wrapperBoxBefore.y : renderBounds.y;
+    const shift = worldVectorToLocal(
+      wrapper.absoluteTransform,
+      padLeft - (renderBounds.x - anchorX),
+      padTop - (renderBounds.y - anchorY)
+    );
+    logJSON("[mo4] applyPadding: autolayout shift", shift);
+    for (const { node } of childSnap) {
+      node.x += shift.x;
+      node.y += shift.y;
+    }
   }
 
   logJSON("[mo4] applyPadding: AFTER", {
@@ -313,6 +391,7 @@ function sortNodesForStableWrap(nodes: SceneNode[]): SceneNode[] {
 }
 
 export function runMultipleOfFourFix(): MultipleOfFourFixResultMessage {
+  resetDebugLog();
   const selection = sortNodesForStableWrap([...figma.currentPage.selection]);
   const errors: string[] = [];
   let fixedParents = 0;
@@ -327,6 +406,7 @@ export function runMultipleOfFourFix(): MultipleOfFourFixResultMessage {
       fixedParents: 0,
       skipped: 0,
       errors: [],
+      debug: debugLog.slice(),
     };
   }
 
@@ -370,7 +450,14 @@ export function runMultipleOfFourFix(): MultipleOfFourFixResultMessage {
           parentType: parent.type,
           parentName: "name" in parent ? parent.name : "(no name)",
         });
-        wrapper = wrapSceneNodeInFixFrame(node);
+        // Проверяем ДО оборачивания: без bbox обёртке неоткуда взять позицию, и слой
+        // остался бы обёрнут фреймом, брошенным в локальных (0,0) родителя.
+        if (!originalRenderBounds || !absBox) {
+          logJSON("[mo4] skip: нет bbox, не оборачиваем", { name: node.name });
+          skipped++;
+          continue;
+        }
+        wrapper = wrapSceneNodeInFixFrame(node, absBox);
         logJSON("[mo4] AFTER wrap", {
           wrapper: { x: wrapper.x, y: wrapper.y, w: wrapper.width, h: wrapper.height },
           wrapperAbs: wrapper.absoluteBoundingBox,
@@ -416,5 +503,6 @@ export function runMultipleOfFourFix(): MultipleOfFourFixResultMessage {
     fixedParents,
     skipped,
     errors,
+    debug: debugLog.slice(),
   };
 }

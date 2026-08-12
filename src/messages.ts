@@ -140,6 +140,8 @@ export type MultipleOfFourFixResultMessage = {
   fixedParents: number;
   skipped: number;
   errors: string[];
+  /** Построчный лог запуска — UI показывает его в блоке «Диагностика». */
+  debug?: string[];
 };
 
 export type RenameLayersResultMessage = {

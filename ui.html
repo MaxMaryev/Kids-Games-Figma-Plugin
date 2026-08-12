@@ -202,6 +202,23 @@
         display: none;
       }
 
+      /* Лог диагностики */
+      .debug-text {
+        width: 100%;
+        box-sizing: border-box;
+        margin-bottom: 8px;
+        padding: 8px 10px;
+        border: 1px solid var(--figma-color-border);
+        border-radius: var(--radius-sm);
+        background: var(--figma-color-bg-secondary);
+        color: var(--figma-color-text-secondary);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 10px;
+        line-height: 1.45;
+        white-space: pre;
+        resize: vertical;
+      }
+
       /* Список нарушений */
       .list-wrap {
         margin-top: 12px;
@@ -887,6 +904,24 @@
           </li>
         </ul>
       </details>
+
+      <details id="mo4DebugWrap" hidden>
+        <summary>Диагностика</summary>
+        <p class="hint">
+          Лог последнего запуска Поправить. Если обёртка встала не туда —
+          скопируйте и пришлите.
+        </p>
+        <textarea
+          id="mo4DebugText"
+          class="debug-text"
+          readonly
+          rows="8"
+          aria-label="Лог последнего запуска"
+        ></textarea>
+        <button type="button" class="secondary action-full" id="mo4DebugCopy">
+          Скопировать
+        </button>
+      </details>
     </div>
 
     <div id="panelNames" class="panel" role="tabpanel" aria-labelledby="tabNames">
@@ -982,6 +1017,9 @@
       const mo4ListTitleEl = document.getElementById("mo4ListTitle");
       const mo4ListBodyEl = document.getElementById("mo4ListBody");
       const mo4SelectAllEl = document.getElementById("mo4SelectAll");
+      const mo4DebugWrapEl = document.getElementById("mo4DebugWrap");
+      const mo4DebugTextEl = document.getElementById("mo4DebugText");
+      const mo4DebugCopyEl = document.getElementById("mo4DebugCopy");
       let mo4ViolationIds = [];
 
       function pluralLayers(n) {
@@ -1996,6 +2034,33 @@
         postToPlugin({ type: "multipleOfFourFix" });
       });
 
+      function renderMo4Debug(lines) {
+        const text = Array.isArray(lines) ? lines.join("\n") : "";
+        mo4DebugTextEl.value = text;
+        mo4DebugWrapEl.hidden = text === "";
+        mo4DebugWrapEl.open = text !== "";
+      }
+
+      mo4DebugCopyEl.addEventListener("click", () => {
+        if (!mo4DebugTextEl.value) return;
+        // В iframe плагина navigator.clipboard часто недоступен, поэтому копируем
+        // выделением самого textarea — он и так на экране.
+        mo4DebugTextEl.focus();
+        mo4DebugTextEl.select();
+        let copied = false;
+        try {
+          copied = document.execCommand("copy");
+        } catch (error) {
+          copied = false;
+        }
+        mo4DebugCopyEl.textContent = copied
+          ? "Скопировано"
+          : "Не вышло — выделите и Ctrl+C";
+        setTimeout(() => {
+          mo4DebugCopyEl.textContent = "Скопировать";
+        }, 2000);
+      });
+
       window.onmessage = (event) => {
         const msg = event.data.pluginMessage;
         if (!msg || !msg.type) {
@@ -2116,6 +2181,7 @@
         }
         if (msg.type === "multipleOfFourFixResult") {
           setMo4Busy(false);
+          renderMo4Debug(msg.debug);
           let text = "";
           if (msg.fixedParents > 0) {
             text +=

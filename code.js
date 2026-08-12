@@ -527,18 +527,92 @@ function runMultipleOfFourCheck() {
   };
 }
 
+// src/figma/geometry.ts
+function worldVectorToLocal(transform, worldDx, worldDy) {
+  const [[a, b], [c, d]] = transform;
+  const det = a * d - b * c;
+  if (Math.abs(det) < 1e-10) {
+    return { x: worldDx, y: worldDy };
+  }
+  return {
+    x: (d * worldDx - b * worldDy) / det,
+    y: (a * worldDy - c * worldDx) / det
+  };
+}
+var ALIGN_EPS = 1e-3;
+function alignNodeToWorldPoint(node, worldX, worldY, passes = 3) {
+  const report = {
+    measured: false,
+    passes: 0,
+    from: null,
+    to: null,
+    target: { x: worldX, y: worldY },
+    residual: null
+  };
+  for (let pass = 0; pass < passes; pass++) {
+    const box = node.absoluteBoundingBox;
+    if (!box) {
+      return report;
+    }
+    report.measured = true;
+    if (!report.from) {
+      report.from = { x: box.x, y: box.y };
+    }
+    report.to = { x: box.x, y: box.y };
+    const worldDx = worldX - box.x;
+    const worldDy = worldY - box.y;
+    report.residual = { x: worldDx, y: worldDy };
+    if (Math.abs(worldDx) < ALIGN_EPS && Math.abs(worldDy) < ALIGN_EPS) {
+      return report;
+    }
+    const parent = node.parent;
+    const transform = parent && "absoluteTransform" in parent ? parent.absoluteTransform : null;
+    const local = transform ? worldVectorToLocal(transform, worldDx, worldDy) : { x: worldDx, y: worldDy };
+    node.x += local.x;
+    node.y += local.y;
+    report.passes++;
+  }
+  const finalBox = node.absoluteBoundingBox;
+  if (finalBox) {
+    report.to = { x: finalBox.x, y: finalBox.y };
+    report.residual = { x: worldX - finalBox.x, y: worldY - finalBox.y };
+  }
+  return report;
+}
+function placeRectangleAtDocumentBox(rectangle, parent, documentBox) {
+  const parentBox = "absoluteBoundingBox" in parent ? parent.absoluteBoundingBox : null;
+  if (parentBox) {
+    rectangle.x = documentBox.x - parentBox.x;
+    rectangle.y = documentBox.y - parentBox.y;
+  } else {
+    rectangle.x = documentBox.x;
+    rectangle.y = documentBox.y;
+  }
+  rectangle.resize(documentBox.width, documentBox.height);
+}
+
 // src/features/multipleOfFourPadding.ts
 var NO4_CHILD_NAME_PREFIX = "[no4] ";
 var MO4_WRAPPER_PLUGIN_KEY = "mo4Wrapper";
 var MO4_WRAPPER_PLUGIN_VALUE = "v1";
 
 // src/features/multipleOfFourFix.ts
+var DEBUG_LOG_LIMIT = 400;
+var debugLog = [];
+function resetDebugLog() {
+  debugLog = [];
+}
 function logJSON(label, payload) {
+  let text;
   try {
-    console.log(label, JSON.stringify(payload));
+    text = `${label} ${JSON.stringify(payload)}`;
   } catch (e) {
-    console.log(label, payload);
+    text = `${label} <\u043D\u0435 \u0441\u0435\u0440\u0438\u0430\u043B\u0438\u0437\u0443\u0435\u0442\u0441\u044F>`;
   }
+  if (debugLog.length < DEBUG_LOG_LIMIT) {
+    debugLog.push(text);
+  }
+  console.log(text);
 }
 function isMo4WrapperFrame(node) {
   return node.type === "FRAME" && node.getPluginData(MO4_WRAPPER_PLUGIN_KEY) === MO4_WRAPPER_PLUGIN_VALUE;
@@ -554,33 +628,28 @@ function getExistingMo4WrapperForNode(node) {
   return null;
 }
 function worldDimsToLocalDims(parentTransform, worldWidth, worldHeight) {
-  if (!parentTransform) return { width: worldWidth, height: worldHeight };
+  if (!parentTransform) {
+    return { width: worldWidth, height: worldHeight, exact: true };
+  }
   const [[a, b], [c, d]] = parentTransform;
+  const p = Math.abs(a);
+  const q = Math.abs(b);
+  const r = Math.abs(c);
+  const s = Math.abs(d);
+  const det = p * s - q * r;
   const sx = Math.sqrt(a * a + c * c);
   const sy = Math.sqrt(b * b + d * d);
-  if (sx < 1e-10 || sy < 1e-10) return { width: worldWidth, height: worldHeight };
-  const cosT = Math.abs(a / sx);
-  const sinT = Math.abs(c / sx);
-  const cos2T = cosT * cosT - sinT * sinT;
-  if (Math.abs(cos2T) < 1e-6) {
-    return { width: worldHeight / sy, height: worldWidth / sx };
+  if (Math.abs(det) < 1e-6 * Math.max(1e-12, sx * sy)) {
+    return {
+      width: sx < 1e-10 ? worldWidth : worldWidth / sx,
+      height: sy < 1e-10 ? worldHeight : worldHeight / sy,
+      exact: false
+    };
   }
   return {
-    width: Math.abs((cosT * worldWidth - sinT * worldHeight) / (sx * cos2T)),
-    height: Math.abs((cosT * worldHeight - sinT * worldWidth) / (sy * cos2T))
-  };
-}
-function worldToLocal(parentTransform, worldX, worldY) {
-  const [[a, b, tx], [c, d, ty]] = parentTransform;
-  const det = a * d - b * c;
-  if (Math.abs(det) < 1e-10) {
-    return { x: worldX - tx, y: worldY - ty };
-  }
-  const dx = worldX - tx;
-  const dy = worldY - ty;
-  return {
-    x: (d * dx - b * dy) / det,
-    y: (a * dy - c * dx) / det
+    width: (s * worldWidth - q * worldHeight) / det,
+    height: (p * worldHeight - r * worldWidth) / det,
+    exact: true
   };
 }
 function copyLayoutSlotFromNodeToWrapper(source, wrapper, outerParent) {
@@ -601,7 +670,7 @@ function copyLayoutSlotFromNodeToWrapper(source, wrapper, outerParent) {
     wrapper.layoutPositioning = source.layoutPositioning;
   }
 }
-function wrapSceneNodeInFixFrame(node) {
+function wrapSceneNodeInFixFrame(node, sourceBox) {
   const parent = node.parent;
   if (!canInsertIntoParent(parent)) {
     throw new Error("\u041D\u0435\u043B\u044C\u0437\u044F \u0432\u0441\u0442\u0430\u0432\u0438\u0442\u044C \u043E\u0431\u0451\u0440\u0442\u043A\u0443 \u0432 \u0440\u043E\u0434\u0438\u0442\u0435\u043B\u044F");
@@ -611,8 +680,6 @@ function wrapSceneNodeInFixFrame(node) {
   }
   const outerParent = parent;
   const index = parent.children.indexOf(node);
-  const localX = node.x;
-  const localY = node.y;
   const localWidth = node.width;
   const localHeight = node.height;
   const originalNodeName = node.name;
@@ -630,10 +697,29 @@ function wrapSceneNodeInFixFrame(node) {
     Math.max(1, localHeight)
   );
   copyLayoutSlotFromNodeToWrapper(node, wrapper, outerParent);
+  if (!parentHasAutoLayout(outerParent)) {
+    const wrapperBefore = wrapper.absoluteBoundingBox;
+    const report = alignNodeToWorldPoint(wrapper, sourceBox.x, sourceBox.y);
+    logJSON("[mo4] wrap: align wrapper to source", {
+      sourceBox,
+      wrapperBefore,
+      report
+    });
+  }
+  const nodeBoxBeforeAppend = node.absoluteBoundingBox;
   wrapper.appendChild(node);
   node.name = `${NO4_CHILD_NAME_PREFIX}${baseNameForWrapper}`;
-  void localX;
-  void localY;
+  const nodeBoxAfterAppend = node.absoluteBoundingBox;
+  const restoreReport = nodeBoxBeforeAppend ? alignNodeToWorldPoint(node, nodeBoxBeforeAppend.x, nodeBoxBeforeAppend.y) : null;
+  logJSON("[mo4] wrap: after appendChild", {
+    nodeBoxBeforeAppend,
+    nodeBoxAfterAppend,
+    restoreReport,
+    nodeBoxRestored: node.absoluteBoundingBox,
+    nodeLocal: { x: node.x, y: node.y, w: node.width, h: node.height },
+    wrapperBox: wrapper.absoluteBoundingBox,
+    wrapperLocal: { x: wrapper.x, y: wrapper.y, w: wrapper.width, h: wrapper.height }
+  });
   return wrapper;
 }
 function applyPaddingToWrapperFrame(wrapper, originalRenderBounds) {
@@ -665,58 +751,107 @@ function applyPaddingToWrapperFrame(wrapper, originalRenderBounds) {
   };
   const outer = wrapper.parent;
   if (!canInsertIntoParent(outer)) {
+    logJSON("[mo4] applyPadding: bad outer parent, skip", {});
     return false;
   }
   const outerScene = outer;
-  const parentTransform = "absoluteTransform" in outerScene ? outerScene.absoluteTransform : null;
-  const parentOrigin = parentTransform ? { x: parentTransform[0][2], y: parentTransform[1][2] } : outerScene.type === "PAGE" ? { x: 0, y: 0 } : null;
-  if (!parentOrigin) {
-    return false;
-  }
-  const oldWrapperX = wrapper.x;
-  const oldWrapperY = wrapper.y;
+  const autoLayoutParent = parentHasAutoLayout(outerScene);
   const childSnap = [];
   for (const child of wrapper.children) {
+    const scene = child;
+    const box = scene.absoluteBoundingBox;
     childSnap.push({
-      node: child,
-      x: child.x,
-      y: child.y
+      node: scene,
+      worldX: box ? box.x : Number.NaN,
+      worldY: box ? box.y : Number.NaN
     });
   }
+  const wrapperBoxBefore = wrapper.absoluteBoundingBox;
   logJSON("[mo4] applyPadding: plan", {
-    parentOrigin,
     expandedDocumentRect,
     padLeft,
     padTop,
-    parentAutolayout: parentHasAutoLayout(outerScene),
-    oldWrapperLocal: { x: oldWrapperX, y: oldWrapperY },
-    childSnap: childSnap.map((c) => ({ name: c.node.name, x: c.x, y: c.y }))
+    parentType: outerScene.type,
+    parentAutolayout: autoLayoutParent,
+    wrapperBoxBefore,
+    childSnap: childSnap.map((c) => ({ name: c.node.name, worldX: c.worldX, worldY: c.worldY }))
   });
+  const parentTransform = "absoluteTransform" in outerScene ? outerScene.absoluteTransform : null;
   const localDims = worldDimsToLocalDims(
     parentTransform,
     expandedDocumentRect.width,
     expandedDocumentRect.height
   );
-  wrapper.resizeWithoutConstraints(localDims.width, localDims.height);
-  if (!parentHasAutoLayout(outerScene)) {
-    let targetWorldX = expandedDocumentRect.x;
-    let targetWorldY = expandedDocumentRect.y;
-    if (parentTransform) {
-      const [[a, b], [c, d]] = parentTransform;
-      const lw = localDims.width;
-      const lh = localDims.height;
-      targetWorldX -= Math.min(0, a * lw, b * lh, a * lw + b * lh);
-      targetWorldY -= Math.min(0, c * lw, d * lh, c * lw + d * lh);
+  wrapper.resizeWithoutConstraints(
+    Math.max(0.01, localDims.width),
+    Math.max(0.01, localDims.height)
+  );
+  const measured = localDims.exact ? wrapper.absoluteBoundingBox : null;
+  if (measured) {
+    const residualW = expandedDocumentRect.width - measured.width;
+    const residualH = expandedDocumentRect.height - measured.height;
+    if (Math.abs(residualW) > 0.01 || Math.abs(residualH) > 0.01) {
+      const freshTransform = "absoluteTransform" in outerScene ? outerScene.absoluteTransform : null;
+      const correction = worldDimsToLocalDims(
+        freshTransform,
+        residualW,
+        residualH
+      );
+      logJSON("[mo4] applyPadding: size correction", {
+        measured: { w: measured.width, h: measured.height },
+        residualW,
+        residualH,
+        correction
+      });
+      if (correction.exact) {
+        wrapper.resizeWithoutConstraints(
+          Math.max(0.01, wrapper.width + correction.width),
+          Math.max(0.01, wrapper.height + correction.height)
+        );
+      }
     }
-    const localPos = parentTransform ? worldToLocal(parentTransform, targetWorldX, targetWorldY) : { x: targetWorldX, y: targetWorldY };
-    wrapper.x = localPos.x;
-    wrapper.y = localPos.y;
   }
-  const dx = wrapper.x - oldWrapperX;
-  const dy = wrapper.y - oldWrapperY;
-  for (const { node, x, y } of childSnap) {
-    node.x = x - dx;
-    node.y = y - dy;
+  if (!autoLayoutParent) {
+    const wrapperBoxAfterResize = wrapper.absoluteBoundingBox;
+    const wrapperReport = alignNodeToWorldPoint(
+      wrapper,
+      expandedDocumentRect.x,
+      expandedDocumentRect.y
+    );
+    logJSON("[mo4] applyPadding: align wrapper", {
+      wrapperBoxAfterResize,
+      report: wrapperReport
+    });
+    for (const { node, worldX, worldY } of childSnap) {
+      if (Number.isNaN(worldX) || Number.isNaN(worldY)) {
+        logJSON("[mo4] applyPadding: child \u0431\u0435\u0437 bbox, \u043D\u0435 \u0434\u0432\u0438\u0433\u0430\u0435\u043C", { name: node.name });
+        continue;
+      }
+      const boxBeforeRestore = node.absoluteBoundingBox;
+      const localBeforeRestore = { x: node.x, y: node.y };
+      const childReport = alignNodeToWorldPoint(node, worldX, worldY);
+      logJSON("[mo4] applyPadding: restore child", {
+        name: node.name,
+        type: node.type,
+        boxBeforeRestore,
+        localBeforeRestore,
+        report: childReport,
+        localAfterRestore: { x: node.x, y: node.y }
+      });
+    }
+  } else {
+    const anchorX = wrapperBoxBefore ? wrapperBoxBefore.x : renderBounds.x;
+    const anchorY = wrapperBoxBefore ? wrapperBoxBefore.y : renderBounds.y;
+    const shift = worldVectorToLocal(
+      wrapper.absoluteTransform,
+      padLeft - (renderBounds.x - anchorX),
+      padTop - (renderBounds.y - anchorY)
+    );
+    logJSON("[mo4] applyPadding: autolayout shift", shift);
+    for (const { node } of childSnap) {
+      node.x += shift.x;
+      node.y += shift.y;
+    }
   }
   logJSON("[mo4] applyPadding: AFTER", {
     wrapper: { x: wrapper.x, y: wrapper.y, w: wrapper.width, h: wrapper.height },
@@ -742,6 +877,7 @@ function sortNodesForStableWrap(nodes) {
   });
 }
 function runMultipleOfFourFix() {
+  resetDebugLog();
   const selection = sortNodesForStableWrap([...figma.currentPage.selection]);
   const errors = [];
   let fixedParents = 0;
@@ -754,7 +890,8 @@ function runMultipleOfFourFix() {
       ok: true,
       fixedParents: 0,
       skipped: 0,
-      errors: []
+      errors: [],
+      debug: debugLog.slice()
     };
   }
   const wrappersSeen = /* @__PURE__ */ new Set();
@@ -795,7 +932,12 @@ function runMultipleOfFourFix() {
           parentType: parent.type,
           parentName: "name" in parent ? parent.name : "(no name)"
         });
-        wrapper = wrapSceneNodeInFixFrame(node);
+        if (!originalRenderBounds || !absBox) {
+          logJSON("[mo4] skip: \u043D\u0435\u0442 bbox, \u043D\u0435 \u043E\u0431\u043E\u0440\u0430\u0447\u0438\u0432\u0430\u0435\u043C", { name: node.name });
+          skipped++;
+          continue;
+        }
+        wrapper = wrapSceneNodeInFixFrame(node, absBox);
         logJSON("[mo4] AFTER wrap", {
           wrapper: { x: wrapper.x, y: wrapper.y, w: wrapper.width, h: wrapper.height },
           wrapperAbs: wrapper.absoluteBoundingBox,
@@ -835,21 +977,9 @@ function runMultipleOfFourFix() {
     ok,
     fixedParents,
     skipped,
-    errors
+    errors,
+    debug: debugLog.slice()
   };
-}
-
-// src/figma/geometry.ts
-function placeRectangleAtDocumentBox(rectangle, parent, documentBox) {
-  const parentBox = "absoluteBoundingBox" in parent ? parent.absoluteBoundingBox : null;
-  if (parentBox) {
-    rectangle.x = documentBox.x - parentBox.x;
-    rectangle.y = documentBox.y - parentBox.y;
-  } else {
-    rectangle.x = documentBox.x;
-    rectangle.y = documentBox.y;
-  }
-  rectangle.resize(documentBox.width, documentBox.height);
 }
 
 // src/features/rasterize.ts
@@ -1210,6 +1340,23 @@ figma.showUI(`<!DOCTYPE html>\r
       }\r
       .status:empty {\r
         display: none;\r
+      }\r
+\r
+      /* \u041B\u043E\u0433 \u0434\u0438\u0430\u0433\u043D\u043E\u0441\u0442\u0438\u043A\u0438 */\r
+      .debug-text {\r
+        width: 100%;\r
+        box-sizing: border-box;\r
+        margin-bottom: 8px;\r
+        padding: 8px 10px;\r
+        border: 1px solid var(--figma-color-border);\r
+        border-radius: var(--radius-sm);\r
+        background: var(--figma-color-bg-secondary);\r
+        color: var(--figma-color-text-secondary);\r
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\r
+        font-size: 10px;\r
+        line-height: 1.45;\r
+        white-space: pre;\r
+        resize: vertical;\r
       }\r
 \r
       /* \u0421\u043F\u0438\u0441\u043E\u043A \u043D\u0430\u0440\u0443\u0448\u0435\u043D\u0438\u0439 */\r
@@ -1897,6 +2044,24 @@ figma.showUI(`<!DOCTYPE html>\r
           </li>\r
         </ul>\r
       </details>\r
+\r
+      <details id="mo4DebugWrap" hidden>\r
+        <summary>\u0414\u0438\u0430\u0433\u043D\u043E\u0441\u0442\u0438\u043A\u0430</summary>\r
+        <p class="hint">\r
+          \u041B\u043E\u0433 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0433\u043E \u0437\u0430\u043F\u0443\u0441\u043A\u0430 \u041F\u043E\u043F\u0440\u0430\u0432\u0438\u0442\u044C. \u0415\u0441\u043B\u0438 \u043E\u0431\u0451\u0440\u0442\u043A\u0430 \u0432\u0441\u0442\u0430\u043B\u0430 \u043D\u0435 \u0442\u0443\u0434\u0430 \u2014\r
+          \u0441\u043A\u043E\u043F\u0438\u0440\u0443\u0439\u0442\u0435 \u0438 \u043F\u0440\u0438\u0448\u043B\u0438\u0442\u0435.\r
+        </p>\r
+        <textarea\r
+          id="mo4DebugText"\r
+          class="debug-text"\r
+          readonly\r
+          rows="8"\r
+          aria-label="\u041B\u043E\u0433 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0433\u043E \u0437\u0430\u043F\u0443\u0441\u043A\u0430"\r
+        ></textarea>\r
+        <button type="button" class="secondary action-full" id="mo4DebugCopy">\r
+          \u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u0442\u044C\r
+        </button>\r
+      </details>\r
     </div>\r
 \r
     <div id="panelNames" class="panel" role="tabpanel" aria-labelledby="tabNames">\r
@@ -1992,6 +2157,9 @@ figma.showUI(`<!DOCTYPE html>\r
       const mo4ListTitleEl = document.getElementById("mo4ListTitle");\r
       const mo4ListBodyEl = document.getElementById("mo4ListBody");\r
       const mo4SelectAllEl = document.getElementById("mo4SelectAll");\r
+      const mo4DebugWrapEl = document.getElementById("mo4DebugWrap");\r
+      const mo4DebugTextEl = document.getElementById("mo4DebugText");\r
+      const mo4DebugCopyEl = document.getElementById("mo4DebugCopy");\r
       let mo4ViolationIds = [];\r
 \r
       function pluralLayers(n) {\r
@@ -3006,6 +3174,33 @@ figma.showUI(`<!DOCTYPE html>\r
         postToPlugin({ type: "multipleOfFourFix" });\r
       });\r
 \r
+      function renderMo4Debug(lines) {\r
+        const text = Array.isArray(lines) ? lines.join("\\n") : "";\r
+        mo4DebugTextEl.value = text;\r
+        mo4DebugWrapEl.hidden = text === "";\r
+        mo4DebugWrapEl.open = text !== "";\r
+      }\r
+\r
+      mo4DebugCopyEl.addEventListener("click", () => {\r
+        if (!mo4DebugTextEl.value) return;\r
+        // \u0412 iframe \u043F\u043B\u0430\u0433\u0438\u043D\u0430 navigator.clipboard \u0447\u0430\u0441\u0442\u043E \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D, \u043F\u043E\u044D\u0442\u043E\u043C\u0443 \u043A\u043E\u043F\u0438\u0440\u0443\u0435\u043C\r
+        // \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u0435\u043C \u0441\u0430\u043C\u043E\u0433\u043E textarea \u2014 \u043E\u043D \u0438 \u0442\u0430\u043A \u043D\u0430 \u044D\u043A\u0440\u0430\u043D\u0435.\r
+        mo4DebugTextEl.focus();\r
+        mo4DebugTextEl.select();\r
+        let copied = false;\r
+        try {\r
+          copied = document.execCommand("copy");\r
+        } catch (error) {\r
+          copied = false;\r
+        }\r
+        mo4DebugCopyEl.textContent = copied\r
+          ? "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E"\r
+          : "\u041D\u0435 \u0432\u044B\u0448\u043B\u043E \u2014 \u0432\u044B\u0434\u0435\u043B\u0438\u0442\u0435 \u0438 Ctrl+C";\r
+        setTimeout(() => {\r
+          mo4DebugCopyEl.textContent = "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u0442\u044C";\r
+        }, 2000);\r
+      });\r
+\r
       window.onmessage = (event) => {\r
         const msg = event.data.pluginMessage;\r
         if (!msg || !msg.type) {\r
@@ -3126,6 +3321,7 @@ figma.showUI(`<!DOCTYPE html>\r
         }\r
         if (msg.type === "multipleOfFourFixResult") {\r
           setMo4Busy(false);\r
+          renderMo4Debug(msg.debug);\r
           let text = "";\r
           if (msg.fixedParents > 0) {\r
             text +=\r
@@ -3235,7 +3431,7 @@ function postSelectionToUi() {
   });
 }
 function postBootstrapToUi() {
-  figma.ui.postMessage({ type: "pluginVersion", version: "1.3.1" });
+  figma.ui.postMessage({ type: "pluginVersion", version: "1.3.2" });
   postSelectionToUi();
   if (presetTreeLoaded) {
     postPresetTreeToUi();
