@@ -1,4 +1,7 @@
-import { buildNamesForSelection } from "../domain/layerNamePresets";
+import {
+  buildNamesForSelection,
+  normalizeStartNumber,
+} from "../domain/layerNamePresets";
 import { sortNodesTopToBottom } from "../figma/nodeQueries";
 import type { RenameLayersMessage, RenameLayersResultMessage } from "../messages";
 
@@ -28,8 +31,11 @@ export function runRenameLayers(
     };
   }
 
+  // startNumber приходит из UI, а isPluginMessageFromUi проверяет только тег типа —
+  // нормализуем здесь, как рядом оборонительно читается template.
+  const startNumber = normalizeStartNumber(message.startNumber);
   const ordered = sortNodesTopToBottom(selection);
-  const names = buildNamesForSelection(template, ordered.length);
+  const names = buildNamesForSelection(template, ordered.length, startNumber);
   const applied: string[] = [];
   const errors: string[] = [];
 

@@ -43,6 +43,8 @@ export type SetUpdateBannerDismissedMessage = {
 export type RenameLayersMessage = {
   type: "renameLayers";
   template: string;
+  /** Номер, с которого начинается счётчик. По умолчанию 1. */
+  startNumber?: number;
 };
 
 export type GetRecentNamePresetsMessage = {

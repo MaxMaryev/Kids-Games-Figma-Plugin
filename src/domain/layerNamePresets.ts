@@ -197,24 +197,54 @@ function withStandardIds(seeds: LayerNamePresetSeed[]): LayerNamePreset[] {
 export const DEFAULT_LAYER_NAME_PRESETS: LayerNamePreset[] =
   withStandardIds(DEFAULT_PRESET_SEEDS);
 
-/** Нумерация всегда с 01 и всегда минимум в две цифры. */
-export function formatCounter(index: number): string {
-  const value = index + 1;
+export const DEFAULT_START_NUMBER = 1;
+const MAX_START_NUMBER = 9999;
+
+/** Стартовый номер из UI: целое в [1, 9999], мусор и NaN → 1. */
+export function normalizeStartNumber(raw: unknown): number {
+  const value = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(value)) {
+    return DEFAULT_START_NUMBER;
+  }
+  const whole = Math.trunc(value);
+  if (whole < DEFAULT_START_NUMBER) {
+    return DEFAULT_START_NUMBER;
+  }
+  return whole > MAX_START_NUMBER ? MAX_START_NUMBER : whole;
+}
+
+/**
+ * Отсчёт идёт от startNumber (по умолчанию 1) и всегда минимум в две цифры.
+ * Ширина дальше растёт естественно: старт 8 на пяти слоях даёт 08, 09, 10, 11, 12.
+ */
+export function formatCounter(
+  index: number,
+  startNumber: number = DEFAULT_START_NUMBER
+): string {
+  const value = index + startNumber;
   return value < 10 ? "0" + value : String(value);
 }
 
 /**
  * Имя для слоя с порядковым номером `index` (0-based, сверху вниз в Layers).
+ * Счётчик начинается с `startNumber`; примеры ниже — для старта 1.
  *
  * - `Eyes_` (группа) → `Eyes_01`, `Eyes_02`…
  * - `Eyes_01_R_TopLash` (лист со счётчиком) → `Eyes_02_R_TopLash`…
  * - `Body` (без счётчика) → `Body_01`, `Body_02`…
  *
+ * Место счётчика в шаблоне ищется как литеральный сегмент `01` — шаблоны приходят
+ * из дерева пресетов и всегда его содержат, поэтому старт 5 даёт `Eyes_05_R_TopLash`.
+ *
  * ВНИМАНИЕ: в ui.html есть зеркальная копия этой функции (`previewName`) для
  * предпросмотра — правки нужно вносить в обоих местах.
  */
-export function buildNameForIndex(template: string, index: number): string {
-  const counter = formatCounter(index);
+export function buildNameForIndex(
+  template: string,
+  index: number,
+  startNumber: number = DEFAULT_START_NUMBER
+): string {
+  const counter = formatCounter(index, startNumber);
   if (template.length > 0 && template.slice(-1) === SEPARATOR) {
     return template + counter;
   }
@@ -229,11 +259,12 @@ export function buildNameForIndex(template: string, index: number): string {
 
 export function buildNamesForSelection(
   template: string,
-  count: number
+  count: number,
+  startNumber: number = DEFAULT_START_NUMBER
 ): string[] {
   const names: string[] = [];
   for (let index = 0; index < count; index++) {
-    names.push(buildNameForIndex(template, index));
+    names.push(buildNameForIndex(template, index, startNumber));
   }
   return names;
 }

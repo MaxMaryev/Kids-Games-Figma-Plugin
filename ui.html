@@ -342,6 +342,33 @@
         box-shadow: 0 0 0 3px var(--accent-soft);
       }
 
+      /* Стартовый номер счётчика — стоит вплотную к полосе предпросмотра,
+         которая его и отражает. */
+      .names-start {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 12px;
+      }
+      .names-start-label {
+        color: var(--figma-color-text-secondary);
+        font-size: 11px;
+      }
+      .names-start-input {
+        width: 64px;
+        padding: 5px 8px;
+        border: 1px solid var(--figma-color-border);
+        border-radius: var(--radius-sm);
+        background: var(--figma-color-bg);
+        color: var(--figma-color-text);
+        font: inherit;
+      }
+      .names-start-input:focus {
+        outline: none;
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px var(--accent-soft);
+      }
+
       .recent {
         display: none;
         margin-top: 8px;
@@ -963,6 +990,21 @@
         <div class="tree-body" id="namesTreeBody" role="tree"></div>
       </div>
 
+      <div class="names-start">
+        <label class="names-start-label" for="namesStart">Начать с</label>
+        <input
+          type="number"
+          class="names-start-input"
+          id="namesStart"
+          value="1"
+          min="1"
+          max="9999"
+          step="1"
+          inputmode="numeric"
+          aria-label="Номер, с которого начинается счётчик"
+        />
+      </div>
+
       <div class="preview" id="namesPreview" aria-live="polite"></div>
       <div class="status-row">
         <div class="status" id="namesStatus" role="status"></div>
@@ -974,8 +1016,7 @@
         <ul>
           <li>
             Порядок — <b>сверху вниз</b> по панели Layers, а не по порядку
-            выделения. Счётчик всегда начинается с <code>01</code> и считает
-            только текущее выделение.
+            выделения. Считается только текущее выделение.
           </li>
           <li>
             Тип-<b>группа</b> (<code>Eyes_</code>) даёт
@@ -986,6 +1027,11 @@
             растёт сегмент <code>01</code> →
             <code>Eyes_02_R_TopLash</code>. Один выделенный слой получит
             имя ровно как в списке.
+          </li>
+          <li>
+            <b>Начать с</b> задаёт первый номер счётчика — при
+            <code>5</code> выйдет <code>Eyes_05</code>, <code>Eyes_06</code>…
+            По умолчанию 1, при каждом открытии плагина сбрасывается обратно.
           </li>
           <li>
             Наведите на строку — в полосе под списком видно, какие имена
@@ -1251,6 +1297,7 @@
       const namesRecentChipsEl = document.getElementById("namesRecentChips");
       const namesTreeEl = document.getElementById("namesTree");
       const namesTreeBodyEl = document.getElementById("namesTreeBody");
+      const namesStartEl = document.getElementById("namesStart");
       const namesPreviewEl = document.getElementById("namesPreview");
       const namesUndoEl = document.getElementById("namesUndo");
       const namesEditToggleEl = document.getElementById("namesEditToggle");
@@ -1309,10 +1356,23 @@
       let confirmingReset = false;
       let focusAfterRender = null;
 
+      // Зеркало normalizeStartNumber из src/domain/layerNamePresets.ts.
+      function readStartNumber() {
+        const value = Number(namesStartEl.value);
+        if (!Number.isFinite(value)) {
+          return 1;
+        }
+        const whole = Math.trunc(value);
+        if (whole < 1) {
+          return 1;
+        }
+        return whole > 9999 ? 9999 : whole;
+      }
+
       // Зеркало buildNameForIndex из src/domain/layerNamePresets.ts —
       // правки нужно вносить в обоих местах.
-      function previewName(template, index) {
-        const value = index + 1;
+      function previewName(template, index, startNumber) {
+        const value = index + startNumber;
         const counter = value < 10 ? "0" + value : String(value);
         if (template.slice(-1) === "_") {
           return template + counter;
@@ -1327,18 +1387,23 @@
       }
 
       function namesForCount(template, count) {
+        const start = readStartNumber();
         if (count === 1) {
-          return previewName(template, 0);
+          return previewName(template, 0, start);
         }
         if (count === 2) {
-          return previewName(template, 0) + ", " + previewName(template, 1);
+          return (
+            previewName(template, 0, start) +
+            ", " +
+            previewName(template, 1, start)
+          );
         }
         return (
-          previewName(template, 0) +
+          previewName(template, 0, start) +
           ", " +
-          previewName(template, 1) +
+          previewName(template, 1, start) +
           " … " +
-          previewName(template, count - 1)
+          previewName(template, count - 1, start)
         );
       }
 
@@ -1992,12 +2057,33 @@
         }
         namesStatusEl.textContent = "Переименование…";
         rememberTemplate(template);
-        postToPlugin({ type: "renameLayers", template });
+        postToPlugin({
+          type: "renameLayers",
+          template,
+          startNumber: readStartNumber(),
+        });
       }
 
       namesSearchEl.addEventListener("input", () => {
         namesFilter = namesSearchEl.value;
         renderNamesTree();
+      });
+
+      // Пересчитываем предпросмотр прямо во время ввода: hoveredTemplate хранится
+      // как раз для такого обновления.
+      namesStartEl.addEventListener("input", () => {
+        if (!isEditingPresets) {
+          setPreview(hoveredTemplate);
+        }
+      });
+
+      // На выходе из поля показываем то, что реально уйдёт в переименование:
+      // «abc», «0», «-3» и пустое схлопываются в 1.
+      namesStartEl.addEventListener("change", () => {
+        namesStartEl.value = String(readStartNumber());
+      });
+      namesStartEl.addEventListener("blur", () => {
+        namesStartEl.value = String(readStartNumber());
       });
 
       renderResetControl();

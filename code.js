@@ -169,12 +169,25 @@ function withStandardIds(seeds) {
   });
 }
 var DEFAULT_LAYER_NAME_PRESETS = withStandardIds(DEFAULT_PRESET_SEEDS);
-function formatCounter(index) {
-  const value = index + 1;
+var DEFAULT_START_NUMBER = 1;
+var MAX_START_NUMBER = 9999;
+function normalizeStartNumber(raw) {
+  const value = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(value)) {
+    return DEFAULT_START_NUMBER;
+  }
+  const whole = Math.trunc(value);
+  if (whole < DEFAULT_START_NUMBER) {
+    return DEFAULT_START_NUMBER;
+  }
+  return whole > MAX_START_NUMBER ? MAX_START_NUMBER : whole;
+}
+function formatCounter(index, startNumber = DEFAULT_START_NUMBER) {
+  const value = index + startNumber;
   return value < 10 ? "0" + value : String(value);
 }
-function buildNameForIndex(template, index) {
-  const counter = formatCounter(index);
+function buildNameForIndex(template, index, startNumber = DEFAULT_START_NUMBER) {
+  const counter = formatCounter(index, startNumber);
   if (template.length > 0 && template.slice(-1) === SEPARATOR) {
     return template + counter;
   }
@@ -186,10 +199,10 @@ function buildNameForIndex(template, index) {
   segments[counterAt] = counter;
   return segments.join(SEPARATOR);
 }
-function buildNamesForSelection(template, count) {
+function buildNamesForSelection(template, count, startNumber = DEFAULT_START_NUMBER) {
   const names = [];
   for (let index = 0; index < count; index++) {
-    names.push(buildNameForIndex(template, index));
+    names.push(buildNameForIndex(template, index, startNumber));
   }
   return names;
 }
@@ -1096,8 +1109,9 @@ function runRenameLayers(message) {
       error: "\u0412\u044B\u0434\u0435\u043B\u0438\u0442\u0435 \u0441\u043B\u043E\u0439(\u0438) \u043D\u0430 \u043A\u0430\u043D\u0432\u0430\u0441\u0435."
     };
   }
+  const startNumber = normalizeStartNumber(message.startNumber);
   const ordered = sortNodesTopToBottom(selection);
-  const names = buildNamesForSelection(template, ordered.length);
+  const names = buildNamesForSelection(template, ordered.length, startNumber);
   const applied = [];
   const errors = [];
   for (let index = 0; index < ordered.length; index++) {
@@ -1479,6 +1493,33 @@ figma.showUI(`<!DOCTYPE html>\r
         color: var(--figma-color-text-secondary);\r
       }\r
       .search-input:focus {\r
+        outline: none;\r
+        border-color: var(--accent);\r
+        box-shadow: 0 0 0 3px var(--accent-soft);\r
+      }\r
+\r
+      /* \u0421\u0442\u0430\u0440\u0442\u043E\u0432\u044B\u0439 \u043D\u043E\u043C\u0435\u0440 \u0441\u0447\u0451\u0442\u0447\u0438\u043A\u0430 \u2014 \u0441\u0442\u043E\u0438\u0442 \u0432\u043F\u043B\u043E\u0442\u043D\u0443\u044E \u043A \u043F\u043E\u043B\u043E\u0441\u0435 \u043F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440\u0430,\r
+         \u043A\u043E\u0442\u043E\u0440\u0430\u044F \u0435\u0433\u043E \u0438 \u043E\u0442\u0440\u0430\u0436\u0430\u0435\u0442. */\r
+      .names-start {\r
+        display: flex;\r
+        align-items: center;\r
+        gap: 8px;\r
+        margin-top: 12px;\r
+      }\r
+      .names-start-label {\r
+        color: var(--figma-color-text-secondary);\r
+        font-size: 11px;\r
+      }\r
+      .names-start-input {\r
+        width: 64px;\r
+        padding: 5px 8px;\r
+        border: 1px solid var(--figma-color-border);\r
+        border-radius: var(--radius-sm);\r
+        background: var(--figma-color-bg);\r
+        color: var(--figma-color-text);\r
+        font: inherit;\r
+      }\r
+      .names-start-input:focus {\r
         outline: none;\r
         border-color: var(--accent);\r
         box-shadow: 0 0 0 3px var(--accent-soft);\r
@@ -2105,6 +2146,21 @@ figma.showUI(`<!DOCTYPE html>\r
         <div class="tree-body" id="namesTreeBody" role="tree"></div>\r
       </div>\r
 \r
+      <div class="names-start">\r
+        <label class="names-start-label" for="namesStart">\u041D\u0430\u0447\u0430\u0442\u044C \u0441</label>\r
+        <input\r
+          type="number"\r
+          class="names-start-input"\r
+          id="namesStart"\r
+          value="1"\r
+          min="1"\r
+          max="9999"\r
+          step="1"\r
+          inputmode="numeric"\r
+          aria-label="\u041D\u043E\u043C\u0435\u0440, \u0441 \u043A\u043E\u0442\u043E\u0440\u043E\u0433\u043E \u043D\u0430\u0447\u0438\u043D\u0430\u0435\u0442\u0441\u044F \u0441\u0447\u0451\u0442\u0447\u0438\u043A"\r
+        />\r
+      </div>\r
+\r
       <div class="preview" id="namesPreview" aria-live="polite"></div>\r
       <div class="status-row">\r
         <div class="status" id="namesStatus" role="status"></div>\r
@@ -2116,8 +2172,7 @@ figma.showUI(`<!DOCTYPE html>\r
         <ul>\r
           <li>\r
             \u041F\u043E\u0440\u044F\u0434\u043E\u043A \u2014 <b>\u0441\u0432\u0435\u0440\u0445\u0443 \u0432\u043D\u0438\u0437</b> \u043F\u043E \u043F\u0430\u043D\u0435\u043B\u0438 Layers, \u0430 \u043D\u0435 \u043F\u043E \u043F\u043E\u0440\u044F\u0434\u043A\u0443\r
-            \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u044F. \u0421\u0447\u0451\u0442\u0447\u0438\u043A \u0432\u0441\u0435\u0433\u0434\u0430 \u043D\u0430\u0447\u0438\u043D\u0430\u0435\u0442\u0441\u044F \u0441 <code>01</code> \u0438 \u0441\u0447\u0438\u0442\u0430\u0435\u0442\r
-            \u0442\u043E\u043B\u044C\u043A\u043E \u0442\u0435\u043A\u0443\u0449\u0435\u0435 \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u0435.\r
+            \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u044F. \u0421\u0447\u0438\u0442\u0430\u0435\u0442\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u0442\u0435\u043A\u0443\u0449\u0435\u0435 \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u0435.\r
           </li>\r
           <li>\r
             \u0422\u0438\u043F-<b>\u0433\u0440\u0443\u043F\u043F\u0430</b> (<code>Eyes_</code>) \u0434\u0430\u0451\u0442\r
@@ -2128,6 +2183,11 @@ figma.showUI(`<!DOCTYPE html>\r
             \u0440\u0430\u0441\u0442\u0451\u0442 \u0441\u0435\u0433\u043C\u0435\u043D\u0442 <code>01</code> \u2192\r
             <code>Eyes_02_R_TopLash</code>. \u041E\u0434\u0438\u043D \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u043D\u044B\u0439 \u0441\u043B\u043E\u0439 \u043F\u043E\u043B\u0443\u0447\u0438\u0442\r
             \u0438\u043C\u044F \u0440\u043E\u0432\u043D\u043E \u043A\u0430\u043A \u0432 \u0441\u043F\u0438\u0441\u043A\u0435.\r
+          </li>\r
+          <li>\r
+            <b>\u041D\u0430\u0447\u0430\u0442\u044C \u0441</b> \u0437\u0430\u0434\u0430\u0451\u0442 \u043F\u0435\u0440\u0432\u044B\u0439 \u043D\u043E\u043C\u0435\u0440 \u0441\u0447\u0451\u0442\u0447\u0438\u043A\u0430 \u2014 \u043F\u0440\u0438\r
+            <code>5</code> \u0432\u044B\u0439\u0434\u0435\u0442 <code>Eyes_05</code>, <code>Eyes_06</code>\u2026\r
+            \u041F\u043E \u0443\u043C\u043E\u043B\u0447\u0430\u043D\u0438\u044E 1, \u043F\u0440\u0438 \u043A\u0430\u0436\u0434\u043E\u043C \u043E\u0442\u043A\u0440\u044B\u0442\u0438\u0438 \u043F\u043B\u0430\u0433\u0438\u043D\u0430 \u0441\u0431\u0440\u0430\u0441\u044B\u0432\u0430\u0435\u0442\u0441\u044F \u043E\u0431\u0440\u0430\u0442\u043D\u043E.\r
           </li>\r
           <li>\r
             \u041D\u0430\u0432\u0435\u0434\u0438\u0442\u0435 \u043D\u0430 \u0441\u0442\u0440\u043E\u043A\u0443 \u2014 \u0432 \u043F\u043E\u043B\u043E\u0441\u0435 \u043F\u043E\u0434 \u0441\u043F\u0438\u0441\u043A\u043E\u043C \u0432\u0438\u0434\u043D\u043E, \u043A\u0430\u043A\u0438\u0435 \u0438\u043C\u0435\u043D\u0430\r
@@ -2393,6 +2453,7 @@ figma.showUI(`<!DOCTYPE html>\r
       const namesRecentChipsEl = document.getElementById("namesRecentChips");\r
       const namesTreeEl = document.getElementById("namesTree");\r
       const namesTreeBodyEl = document.getElementById("namesTreeBody");\r
+      const namesStartEl = document.getElementById("namesStart");\r
       const namesPreviewEl = document.getElementById("namesPreview");\r
       const namesUndoEl = document.getElementById("namesUndo");\r
       const namesEditToggleEl = document.getElementById("namesEditToggle");\r
@@ -2451,10 +2512,23 @@ figma.showUI(`<!DOCTYPE html>\r
       let confirmingReset = false;\r
       let focusAfterRender = null;\r
 \r
+      // \u0417\u0435\u0440\u043A\u0430\u043B\u043E normalizeStartNumber \u0438\u0437 src/domain/layerNamePresets.ts.\r
+      function readStartNumber() {\r
+        const value = Number(namesStartEl.value);\r
+        if (!Number.isFinite(value)) {\r
+          return 1;\r
+        }\r
+        const whole = Math.trunc(value);\r
+        if (whole < 1) {\r
+          return 1;\r
+        }\r
+        return whole > 9999 ? 9999 : whole;\r
+      }\r
+\r
       // \u0417\u0435\u0440\u043A\u0430\u043B\u043E buildNameForIndex \u0438\u0437 src/domain/layerNamePresets.ts \u2014\r
       // \u043F\u0440\u0430\u0432\u043A\u0438 \u043D\u0443\u0436\u043D\u043E \u0432\u043D\u043E\u0441\u0438\u0442\u044C \u0432 \u043E\u0431\u043E\u0438\u0445 \u043C\u0435\u0441\u0442\u0430\u0445.\r
-      function previewName(template, index) {\r
-        const value = index + 1;\r
+      function previewName(template, index, startNumber) {\r
+        const value = index + startNumber;\r
         const counter = value < 10 ? "0" + value : String(value);\r
         if (template.slice(-1) === "_") {\r
           return template + counter;\r
@@ -2469,18 +2543,23 @@ figma.showUI(`<!DOCTYPE html>\r
       }\r
 \r
       function namesForCount(template, count) {\r
+        const start = readStartNumber();\r
         if (count === 1) {\r
-          return previewName(template, 0);\r
+          return previewName(template, 0, start);\r
         }\r
         if (count === 2) {\r
-          return previewName(template, 0) + ", " + previewName(template, 1);\r
+          return (\r
+            previewName(template, 0, start) +\r
+            ", " +\r
+            previewName(template, 1, start)\r
+          );\r
         }\r
         return (\r
-          previewName(template, 0) +\r
+          previewName(template, 0, start) +\r
           ", " +\r
-          previewName(template, 1) +\r
+          previewName(template, 1, start) +\r
           " \u2026 " +\r
-          previewName(template, count - 1)\r
+          previewName(template, count - 1, start)\r
         );\r
       }\r
 \r
@@ -3134,12 +3213,33 @@ figma.showUI(`<!DOCTYPE html>\r
         }\r
         namesStatusEl.textContent = "\u041F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u043D\u0438\u0435\u2026";\r
         rememberTemplate(template);\r
-        postToPlugin({ type: "renameLayers", template });\r
+        postToPlugin({\r
+          type: "renameLayers",\r
+          template,\r
+          startNumber: readStartNumber(),\r
+        });\r
       }\r
 \r
       namesSearchEl.addEventListener("input", () => {\r
         namesFilter = namesSearchEl.value;\r
         renderNamesTree();\r
+      });\r
+\r
+      // \u041F\u0435\u0440\u0435\u0441\u0447\u0438\u0442\u044B\u0432\u0430\u0435\u043C \u043F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440 \u043F\u0440\u044F\u043C\u043E \u0432\u043E \u0432\u0440\u0435\u043C\u044F \u0432\u0432\u043E\u0434\u0430: hoveredTemplate \u0445\u0440\u0430\u043D\u0438\u0442\u0441\u044F\r
+      // \u043A\u0430\u043A \u0440\u0430\u0437 \u0434\u043B\u044F \u0442\u0430\u043A\u043E\u0433\u043E \u043E\u0431\u043D\u043E\u0432\u043B\u0435\u043D\u0438\u044F.\r
+      namesStartEl.addEventListener("input", () => {\r
+        if (!isEditingPresets) {\r
+          setPreview(hoveredTemplate);\r
+        }\r
+      });\r
+\r
+      // \u041D\u0430 \u0432\u044B\u0445\u043E\u0434\u0435 \u0438\u0437 \u043F\u043E\u043B\u044F \u043F\u043E\u043A\u0430\u0437\u044B\u0432\u0430\u0435\u043C \u0442\u043E, \u0447\u0442\u043E \u0440\u0435\u0430\u043B\u044C\u043D\u043E \u0443\u0439\u0434\u0451\u0442 \u0432 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u043D\u0438\u0435:\r
+      // \xABabc\xBB, \xAB0\xBB, \xAB-3\xBB \u0438 \u043F\u0443\u0441\u0442\u043E\u0435 \u0441\u0445\u043B\u043E\u043F\u044B\u0432\u0430\u044E\u0442\u0441\u044F \u0432 1.\r
+      namesStartEl.addEventListener("change", () => {\r
+        namesStartEl.value = String(readStartNumber());\r
+      });\r
+      namesStartEl.addEventListener("blur", () => {\r
+        namesStartEl.value = String(readStartNumber());\r
       });\r
 \r
       renderResetControl();\r
@@ -3433,7 +3533,7 @@ function postSelectionToUi() {
   });
 }
 function postBootstrapToUi() {
-  figma.ui.postMessage({ type: "pluginVersion", version: "1.3.3" });
+  figma.ui.postMessage({ type: "pluginVersion", version: "1.4.0" });
   postSelectionToUi();
   if (presetTreeLoaded) {
     postPresetTreeToUi();
