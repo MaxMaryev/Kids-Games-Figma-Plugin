@@ -22,6 +22,53 @@ export function isPageLikeParent(parent: BaseNode): boolean {
 }
 
 /**
+ * Типы, которые в PSD становятся папкой. BOOLEAN_OPERATION сюда не входит
+ * намеренно: у него есть children, но это операнды, а не слои.
+ */
+export function isPsdContainerType(node: SceneNode): node is SceneNode &
+  ChildrenMixin {
+  return (
+    node.type === "FRAME" ||
+    node.type === "GROUP" ||
+    node.type === "COMPONENT" ||
+    node.type === "COMPONENT_SET" ||
+    node.type === "INSTANCE" ||
+    node.type === "SECTION"
+  );
+}
+
+export function hasVisibleEffects(node: SceneNode): boolean {
+  if (!("effects" in node)) {
+    return false;
+  }
+  const effects = node.effects;
+  if (!Array.isArray(effects)) {
+    return false;
+  }
+  return effects.some((effect) => effect.visible !== false);
+}
+
+function hasVisiblePaintList(paints: unknown): boolean {
+  if (!Array.isArray(paints)) {
+    return false;
+  }
+  return (paints as readonly Paint[]).some((paint) => paint.visible !== false);
+}
+
+/** Собственная заливка или обводка контейнера — её нельзя отрендерить отдельно от детей. */
+export function hasVisiblePaint(node: SceneNode): boolean {
+  const fills = "fills" in node ? node.fills : null;
+  const strokes = "strokes" in node ? node.strokes : null;
+  return hasVisiblePaintList(fills) || hasVisiblePaintList(strokes);
+}
+
+export function hasMaskChild(node: SceneNode & ChildrenMixin): boolean {
+  return node.children.some(
+    (child) => "isMask" in child && child.isMask === true
+  );
+}
+
+/**
  * Путь индексов от корня документа до узла. В Figma children[0] — нижний слой,
  * поэтому в панели Layers порядок обратный: больший индекс = выше.
  */

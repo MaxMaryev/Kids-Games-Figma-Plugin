@@ -1,12 +1,11 @@
 {
   "compilerOptions": {
     "target": "ES2017",
-    "lib": ["ES2017"],
+    "lib": ["ES2017", "DOM"],
     "strict": true,
     "moduleResolution": "node",
     "skipLibCheck": true,
-    "types": ["@figma/plugin-typings"]
+    "types": []
   },
-  "include": ["src/**/*.ts"],
-  "exclude": ["src/ui"]
+  "include": ["src/ui/**/*.ts", "src/domain/**/*.ts", "src/messages.ts"]
 }

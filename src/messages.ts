@@ -1,5 +1,6 @@
 import type { LayerNamePreset } from "./domain/layerNamePresets";
 import type { MoveDirection } from "./domain/presetTreeOps";
+import type { PsdBox } from "./domain/psdLayout";
 
 export type OriginalDisposition = "keep" | "replace" | "hide";
 
@@ -88,6 +89,34 @@ export type UndoPresetEditMessage = {
   type: "undoPresetEdit";
 };
 
+export type PsdExportStartMessage = {
+  type: "psdExportStart";
+  scale: number;
+};
+
+/**
+ * Подтверждение, что слой декодирован. Держит в полёте ровно один PNG: без
+ * него песочница гонит байты со скоростью exportAsync, а UI копит очередь
+ * поверх уже готовых ImageData.
+ */
+export type PsdExportLayerAckMessage = {
+  type: "psdExportLayerAck";
+  sessionId: number;
+  index: number;
+};
+
+export type PsdExportCancelMessage = {
+  type: "psdExportCancel";
+  sessionId: number;
+};
+
+/** figma.notify доступен только в песочнице — UI просит показать тост. */
+export type PsdExportNotifyMessage = {
+  type: "psdExportNotify";
+  text: string;
+  isError?: boolean;
+};
+
 export type PluginMessageFromUi =
   | RasterizeMessage
   | MultipleOfFourCheckMessage
@@ -105,7 +134,11 @@ export type PluginMessageFromUi =
   | SelectNodesMessage
   | RequestPluginVersionMessage
   | GetUpdateBannerDismissedMessage
-  | SetUpdateBannerDismissedMessage;
+  | SetUpdateBannerDismissedMessage
+  | PsdExportStartMessage
+  | PsdExportLayerAckMessage
+  | PsdExportCancelMessage
+  | PsdExportNotifyMessage;
 
 export type DoneMessage = {
   type: "done";
@@ -186,6 +219,87 @@ export type UpdateBannerDismissedMessage = {
   dismissedRemoteVersion: string | null;
 };
 
+export type PsdSolidFill = {
+  r: number;
+  g: number;
+  b: number;
+  opacity: number;
+};
+
+/**
+ * Дерево будущего PSD. Листья несут только геометрию: пиксели приезжают
+ * отдельными сообщениями и сшиваются по index.
+ */
+export type PsdExportTreeNode =
+  | {
+      kind: "group";
+      nodeId: string;
+      name: string;
+      children: PsdExportTreeNode[];
+    }
+  | {
+      kind: "leaf";
+      nodeId: string;
+      name: string;
+      index: number;
+      /** absoluteRenderBounds в координатах документа: с тенями, но обрезан предком. */
+      renderBox: PsdBox;
+      /** absoluteBoundingBox в координатах документа: без эффектов, но не обрезан. */
+      boundsBox: PsdBox;
+      /** Накопленный клип предков; null — не обрезаем. */
+      clipBox: PsdBox | null;
+    }
+  /** Синтетическая подложка под сплошную заливку корневого фрейма. */
+  | {
+      kind: "solid";
+      name: string;
+      fill: PsdSolidFill;
+    };
+
+export type PsdExportStructureMessage = {
+  type: "psdExportStructure";
+  sessionId: number;
+  docWidth: number;
+  docHeight: number;
+  scale: number;
+  /** Уже санитизировано, без расширения. */
+  fileName: string;
+  /** Больше 30000 px — только .psb, обычный .psd такое не открывает. */
+  psb: boolean;
+  leafCount: number;
+  /** Порядок как в Figma: children[0] — нижний слой. */
+  children: PsdExportTreeNode[];
+  warnings: string[];
+};
+
+export type PsdExportLayerBytesMessage = {
+  type: "psdExportLayerBytes";
+  sessionId: number;
+  index: number;
+  ok: boolean;
+  /** При ok === false пустой: индексы обязаны оставаться выровненными. */
+  bytes: Uint8Array;
+  reason?: string;
+};
+
+/**
+ * Сплющенный кадр всего фрейма. Photoshop читает слои, а Проводник, Preview и
+ * прочие не-Adobe просмотрщики — только композит; без него файл превьюится пустым.
+ */
+export type PsdExportCompositeMessage = {
+  type: "psdExportComposite";
+  sessionId: number;
+  bytes: Uint8Array;
+};
+
+export type PsdExportFinishedMessage = {
+  type: "psdExportFinished";
+  sessionId: number;
+  ok: boolean;
+  error?: string;
+  warnings: string[];
+};
+
 export type PluginMessageToUi =
   | DoneMessage
   | MultipleOfFourCheckResultMessage
@@ -195,7 +309,11 @@ export type PluginMessageToUi =
   | RecentNamePresetsMessage
   | SelectionChangedMessage
   | PluginVersionMessage
-  | UpdateBannerDismissedMessage;
+  | UpdateBannerDismissedMessage
+  | PsdExportStructureMessage
+  | PsdExportLayerBytesMessage
+  | PsdExportCompositeMessage
+  | PsdExportFinishedMessage;
 
 export function isPluginMessageFromUi(raw: unknown): raw is PluginMessageFromUi {
   if (!raw || typeof raw !== "object" || !("type" in raw)) {
@@ -219,6 +337,10 @@ export function isPluginMessageFromUi(raw: unknown): raw is PluginMessageFromUi 
     type === "selectNodes" ||
     type === "requestPluginVersion" ||
     type === "getUpdateBannerDismissed" ||
-    type === "setUpdateBannerDismissed"
+    type === "setUpdateBannerDismissed" ||
+    type === "psdExportStart" ||
+    type === "psdExportLayerAck" ||
+    type === "psdExportCancel" ||
+    type === "psdExportNotify"
   );
 }

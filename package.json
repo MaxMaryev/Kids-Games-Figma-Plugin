@@ -1,10 +1,11 @@
 {
   "name": "figma-vector-to-raster",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "private": true,
   "scripts": {
     "build": "node build.cjs",
     "watch": "node build.cjs --watch",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.ui.json",
     "release": "node release.cjs",
     "verify": "node verify.cjs"
   },
@@ -12,5 +13,8 @@
     "@figma/plugin-typings": "^1.110.0",
     "esbuild": "^0.25.0",
     "typescript": "^5.7.0"
+  },
+  "dependencies": {
+    "ag-psd": "^31.0.2"
   }
 }

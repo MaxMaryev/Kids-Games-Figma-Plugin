@@ -12,6 +12,11 @@ import {
 } from "./domain/presetTreeOps";
 import { runMultipleOfFourCheck } from "./features/multipleOfFourCheck";
 import { runMultipleOfFourFix } from "./features/multipleOfFourFix";
+import {
+  cancelPsdExport,
+  resolvePsdAck,
+  runPsdExport,
+} from "./features/psdExport";
 import { runRasterize } from "./features/rasterize";
 import { runRenameLayers } from "./features/renameLayers";
 import {
@@ -219,6 +224,26 @@ figma.ui.onmessage = async (raw: unknown) => {
 
   if (raw.type === "rasterize") {
     figma.ui.postMessage(await runRasterize(raw));
+    return;
+  }
+
+  if (raw.type === "psdExportStart") {
+    await runPsdExport(raw);
+    return;
+  }
+
+  if (raw.type === "psdExportLayerAck") {
+    resolvePsdAck(raw.sessionId, raw.index);
+    return;
+  }
+
+  if (raw.type === "psdExportCancel") {
+    cancelPsdExport(raw.sessionId);
+    return;
+  }
+
+  if (raw.type === "psdExportNotify") {
+    figma.notify(raw.text, { error: raw.isError === true });
     return;
   }
 

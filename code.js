@@ -307,7 +307,7 @@ function renamePreset(tree, id, nextTemplate) {
     }
     return copy;
   });
-  const walk = (nodes) => nodes.map((node) => {
+  const walk2 = (nodes) => nodes.map((node) => {
     if (node.id === id) {
       const copy2 = cloneNode(node);
       copy2.template = template;
@@ -318,11 +318,11 @@ function renamePreset(tree, id, nextTemplate) {
     }
     const copy = cloneNode(node);
     if (copy.children) {
-      copy.children = walk(copy.children);
+      copy.children = walk2(copy.children);
     }
     return copy;
   });
-  return { tree: walk(tree), affected, found: true };
+  return { tree: walk2(tree), affected, found: true };
 }
 function addPreset(tree, parentId, template) {
   const cleaned = template.trim();
@@ -333,18 +333,18 @@ function addPreset(tree, parentId, template) {
   if (!parentId) {
     return { tree: cloneTree(tree).concat([added]), addedId: added.id };
   }
-  const walk = (nodes) => nodes.map((node) => {
+  const walk2 = (nodes) => nodes.map((node) => {
     const copy = cloneNode(node);
     if (copy.id === parentId) {
       copy.children = (copy.children || []).concat([added]);
       return copy;
     }
     if (copy.children) {
-      copy.children = walk(copy.children);
+      copy.children = walk2(copy.children);
     }
     return copy;
   });
-  return { tree: walk(tree), addedId: added.id };
+  return { tree: walk2(tree), addedId: added.id };
 }
 function removePreset(tree, id) {
   const target = findPreset(tree, id);
@@ -352,7 +352,7 @@ function removePreset(tree, id) {
     return { tree: cloneTree(tree), removed: 0 };
   }
   const removed = 1 + (target.children ? countPresets(target.children) : 0);
-  const walk = (nodes) => {
+  const walk2 = (nodes) => {
     const result = [];
     for (const node of nodes) {
       if (node.id === id) {
@@ -360,7 +360,7 @@ function removePreset(tree, id) {
       }
       const copy = cloneNode(node);
       if (copy.children) {
-        copy.children = walk(copy.children);
+        copy.children = walk2(copy.children);
         if (copy.children.length === 0) {
           delete copy.children;
         }
@@ -369,7 +369,7 @@ function removePreset(tree, id) {
     }
     return result;
   };
-  return { tree: walk(tree), removed };
+  return { tree: walk2(tree), removed };
 }
 function movePreset(tree, id, direction) {
   let done = false;
@@ -440,6 +440,35 @@ function getAbsoluteRenderBounds(node) {
 }
 function canInsertIntoParent(parent) {
   return Boolean(parent && "insertChild" in parent);
+}
+function isPsdContainerType(node) {
+  return node.type === "FRAME" || node.type === "GROUP" || node.type === "COMPONENT" || node.type === "COMPONENT_SET" || node.type === "INSTANCE" || node.type === "SECTION";
+}
+function hasVisibleEffects(node) {
+  if (!("effects" in node)) {
+    return false;
+  }
+  const effects = node.effects;
+  if (!Array.isArray(effects)) {
+    return false;
+  }
+  return effects.some((effect) => effect.visible !== false);
+}
+function hasVisiblePaintList(paints) {
+  if (!Array.isArray(paints)) {
+    return false;
+  }
+  return paints.some((paint) => paint.visible !== false);
+}
+function hasVisiblePaint(node) {
+  const fills = "fills" in node ? node.fills : null;
+  const strokes = "strokes" in node ? node.strokes : null;
+  return hasVisiblePaintList(fills) || hasVisiblePaintList(strokes);
+}
+function hasMaskChild(node) {
+  return node.children.some(
+    (child) => "isMask" in child && child.isMask === true
+  );
 }
 function layerOrderPath(node) {
   const path = [];
@@ -997,6 +1026,422 @@ function runMultipleOfFourFix() {
   };
 }
 
+// src/domain/psdFileName.ts
+var FORBIDDEN = /[\\/:*?"<>|\u0000-\u001f]/g;
+var RESERVED = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
+var MAX_LENGTH = 120;
+function sanitizePsdFileName(rawName) {
+  let name = typeof rawName === "string" ? rawName : "";
+  name = name.replace(FORBIDDEN, "_");
+  name = name.replace(/\s+/g, " ").trim();
+  name = name.replace(/[. ]+$/, "");
+  if (name.length > MAX_LENGTH) {
+    name = name.slice(0, MAX_LENGTH).replace(/[. ]+$/, "");
+  }
+  if (name.length === 0) {
+    return "frame";
+  }
+  if (RESERVED.test(name)) {
+    return "_" + name;
+  }
+  return name;
+}
+
+// src/domain/psdLayout.ts
+function toDocBox(rect, originX, originY, scale) {
+  return {
+    x: (rect.x - originX) * scale,
+    y: (rect.y - originY) * scale,
+    width: rect.width * scale,
+    height: rect.height * scale
+  };
+}
+
+// src/figma/psdTraversal.ts
+var MIN_SIZE = 0.5;
+function intersectBox(box, clip) {
+  if (!clip) {
+    return box;
+  }
+  const x = Math.max(box.x, clip.x);
+  const y = Math.max(box.y, clip.y);
+  const right = Math.min(box.x + box.width, clip.x + clip.width);
+  const bottom = Math.min(box.y + box.height, clip.y + clip.height);
+  return { x, y, width: right - x, height: bottom - y };
+}
+function isEmptyBox(box) {
+  return box.width < MIN_SIZE || box.height < MIN_SIZE;
+}
+function visiblePaints(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((paint) => paint.visible !== false);
+}
+function rootSolidFill(root) {
+  if (!("fills" in root)) {
+    return null;
+  }
+  const paints = visiblePaints(root.fills);
+  if (paints.length !== 1) {
+    return null;
+  }
+  const paint = paints[0];
+  if (paint.type !== "SOLID") {
+    return null;
+  }
+  return {
+    r: Math.round(paint.color.r * 255),
+    g: Math.round(paint.color.g * 255),
+    b: Math.round(paint.color.b * 255),
+    opacity: typeof paint.opacity === "number" ? paint.opacity : 1
+  };
+}
+var EMPTY_CONTAINER = "\u043F\u0443\u0441\u0442\u043E\u0439 \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440";
+function mustFlatten(node) {
+  if (node.children.length === 0) {
+    return EMPTY_CONTAINER;
+  }
+  if (hasMaskChild(node)) {
+    return "\u0432\u043D\u0443\u0442\u0440\u0438 \u043C\u0430\u0441\u043A\u0430";
+  }
+  if ("opacity" in node && node.opacity < 1) {
+    return "\u0441\u0432\u043E\u044F \u043F\u0440\u043E\u0437\u0440\u0430\u0447\u043D\u043E\u0441\u0442\u044C";
+  }
+  if ("blendMode" in node && node.blendMode !== "PASS_THROUGH") {
+    return "\u0441\u0432\u043E\u0439 \u0440\u0435\u0436\u0438\u043C \u043D\u0430\u043B\u043E\u0436\u0435\u043D\u0438\u044F";
+  }
+  if (hasVisibleEffects(node)) {
+    return "\u0441\u0432\u043E\u0438 \u044D\u0444\u0444\u0435\u043A\u0442\u044B";
+  }
+  if (node.type !== "GROUP" && hasVisiblePaint(node)) {
+    return "\u0441\u0432\u043E\u044F \u0437\u0430\u043B\u0438\u0432\u043A\u0430 \u0438\u043B\u0438 \u043E\u0431\u0432\u043E\u0434\u043A\u0430";
+  }
+  return null;
+}
+function clipsOwnContent(node) {
+  return "clipsContent" in node && node.clipsContent === true;
+}
+function makeLeaf(node, renderBox, boundsBox, clipBox, ctx) {
+  const index = ctx.leaves.length;
+  ctx.leaves.push(node);
+  const visible = intersectBox(renderBox, clipBox);
+  ctx.estimatedPixelBytes += Math.round(visible.width) * Math.round(visible.height) * 4;
+  return {
+    kind: "leaf",
+    nodeId: node.id,
+    name: node.name,
+    index,
+    renderBox,
+    boundsBox,
+    clipBox
+  };
+}
+function walk(node, clipBox, ctx) {
+  if (!node.visible) {
+    return null;
+  }
+  if (node.type === "SLICE") {
+    return null;
+  }
+  if ("opacity" in node && node.opacity === 0) {
+    return null;
+  }
+  const bounds = node.absoluteBoundingBox;
+  if (!bounds) {
+    return null;
+  }
+  const render = getAbsoluteRenderBounds(node) || bounds;
+  const renderBox = toDocBox(render, ctx.originX, ctx.originY, ctx.scale);
+  const boundsBox = toDocBox(bounds, ctx.originX, ctx.originY, ctx.scale);
+  if (isEmptyBox(renderBox)) {
+    return null;
+  }
+  if (isEmptyBox(intersectBox(renderBox, clipBox))) {
+    return null;
+  }
+  if (!isPsdContainerType(node)) {
+    return makeLeaf(node, renderBox, boundsBox, clipBox, ctx);
+  }
+  const flattenReason = mustFlatten(node);
+  if (flattenReason) {
+    if (flattenReason !== EMPTY_CONTAINER) {
+      ctx.warnings.push(`${node.name}: \u0441\u043B\u043E\u0439 \u0441\u043E\u0431\u0440\u0430\u043D \u0446\u0435\u043B\u0438\u043A\u043E\u043C \u2014 ${flattenReason}`);
+    }
+    return makeLeaf(node, renderBox, boundsBox, clipBox, ctx);
+  }
+  const childClip = clipsOwnContent(node) ? intersectBox(boundsBox, clipBox) : clipBox;
+  const children = [];
+  for (const child of node.children) {
+    const built = walk(child, childClip, ctx);
+    if (built) {
+      children.push(built);
+    }
+  }
+  if (children.length === 0) {
+    return null;
+  }
+  return { kind: "group", nodeId: node.id, name: node.name, children };
+}
+function buildPsdTree(root, scale) {
+  const bounds = root.absoluteBoundingBox;
+  if (!bounds) {
+    throw new Error("\u0423 \u0444\u0440\u0435\u0439\u043C\u0430 \u043D\u0435\u0442 absoluteBoundingBox");
+  }
+  const docWidth = Math.max(1, Math.round(bounds.width * scale));
+  const docHeight = Math.max(1, Math.round(bounds.height * scale));
+  const ctx = {
+    originX: bounds.x,
+    originY: bounds.y,
+    scale,
+    leaves: [],
+    warnings: [],
+    estimatedPixelBytes: 0
+  };
+  const docBox = { x: 0, y: 0, width: docWidth, height: docHeight };
+  const rootClip = clipsOwnContent(root) ? docBox : null;
+  const children = [];
+  const background = rootSolidFill(root);
+  if (background) {
+    children.push({ kind: "solid", name: "\u0424\u043E\u043D", fill: background });
+  } else if ("fills" in root && visiblePaints(root.fills).length > 0) {
+    ctx.warnings.push(
+      "\u0424\u043E\u043D \u0444\u0440\u0435\u0439\u043C\u0430 \u043D\u0435 \u043F\u0435\u0440\u0435\u043D\u0435\u0441\u0451\u043D \u2014 \u0437\u0430\u043B\u0435\u0439\u0442\u0435 \u0435\u0433\u043E \u0441\u043F\u043B\u043E\u0448\u043D\u044B\u043C \u0446\u0432\u0435\u0442\u043E\u043C \u0438\u043B\u0438 \u0432\u044B\u043D\u0435\u0441\u0438\u0442\u0435 \u043E\u0442\u0434\u0435\u043B\u044C\u043D\u044B\u043C \u0441\u043B\u043E\u0435\u043C"
+    );
+  }
+  if ("strokes" in root && visiblePaints(root.strokes).length > 0) {
+    ctx.warnings.push("\u041E\u0431\u0432\u043E\u0434\u043A\u0430 \u043A\u043E\u0440\u043D\u0435\u0432\u043E\u0433\u043E \u0444\u0440\u0435\u0439\u043C\u0430 \u0432 PSD \u043D\u0435 \u043F\u0435\u0440\u0435\u043D\u043E\u0441\u0438\u0442\u0441\u044F");
+  }
+  if (isPsdContainerType(root) && !hasMaskChild(root)) {
+    for (const child of root.children) {
+      const built = walk(child, rootClip, ctx);
+      if (built) {
+        children.push(built);
+      }
+    }
+  } else {
+    const render = getAbsoluteRenderBounds(root) || bounds;
+    const renderBox = toDocBox(render, ctx.originX, ctx.originY, ctx.scale);
+    const boundsBox = toDocBox(bounds, ctx.originX, ctx.originY, ctx.scale);
+    children.push(makeLeaf(root, renderBox, boundsBox, rootClip, ctx));
+  }
+  return {
+    children,
+    leaves: ctx.leaves,
+    warnings: ctx.warnings,
+    docWidth,
+    docHeight,
+    estimatedPixelBytes: ctx.estimatedPixelBytes
+  };
+}
+
+// src/features/psdExport.ts
+var PSD_MAX_SIDE = 3e4;
+var PSB_MAX_SIDE = 3e5;
+var MAX_LEAVES = 800;
+var MAX_PIXEL_BYTES = 12e8;
+var ACK_TIMEOUT_MS = 3e3;
+var ROOT_TYPES = [
+  "FRAME",
+  "COMPONENT",
+  "COMPONENT_SET",
+  "INSTANCE",
+  "SECTION",
+  "GROUP"
+];
+var session = null;
+var nextSessionId = 1;
+function finish(sessionId, ok, warnings, error) {
+  const payload = {
+    type: "psdExportFinished",
+    sessionId,
+    ok,
+    warnings
+  };
+  if (error) {
+    payload.error = error;
+  }
+  figma.ui.postMessage(payload);
+}
+function fail(error) {
+  figma.notify(error, { error: true });
+  finish(0, false, [], error);
+}
+function waitForAck(current) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      current.resolveAck = null;
+      resolve();
+    };
+    current.resolveAck = done;
+    setTimeout(done, ACK_TIMEOUT_MS);
+  });
+}
+function resolvePsdAck(sessionId, index) {
+  if (!session || session.id !== sessionId) {
+    return;
+  }
+  void index;
+  const resolve = session.resolveAck;
+  if (resolve) {
+    resolve();
+  }
+}
+function cancelPsdExport(sessionId) {
+  if (!session || session.id !== sessionId) {
+    return;
+  }
+  session.cancelled = true;
+  const resolve = session.resolveAck;
+  if (resolve) {
+    resolve();
+  }
+}
+function validateRoot() {
+  const selection = figma.currentPage.selection;
+  if (selection.length === 0) {
+    fail("\u041D\u0435\u0442 \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u044F \u2014 \u0432\u044B\u0434\u0435\u043B\u0438\u0442\u0435 \u0444\u0440\u0435\u0439\u043C.");
+    return null;
+  }
+  if (selection.length > 1) {
+    fail(`\u0412\u044B\u0434\u0435\u043B\u0438\u0442\u0435 \u0440\u043E\u0432\u043D\u043E \u043E\u0434\u0438\u043D \u0444\u0440\u0435\u0439\u043C \u2014 \u0441\u0435\u0439\u0447\u0430\u0441 \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u043E ${selection.length}.`);
+    return null;
+  }
+  const node = selection[0];
+  if (ROOT_TYPES.indexOf(node.type) === -1) {
+    fail(`PSD \u0441\u043E\u0431\u0438\u0440\u0430\u0435\u0442\u0441\u044F \u0438\u0437 \u0444\u0440\u0435\u0439\u043C\u0430 \u2014 \u0432\u044B\u0434\u0435\u043B\u0435\u043D \u0441\u043B\u043E\u0439 \u0442\u0438\u043F\u0430 ${node.type}.`);
+    return null;
+  }
+  if ("rotation" in node && Math.abs(node.rotation) > 0.01) {
+    fail("\u041F\u043E\u0432\u0435\u0440\u043D\u0438\u0442\u0435 \u0444\u0440\u0435\u0439\u043C \u0432 0\xB0 \u2014 \u0445\u043E\u043B\u0441\u0442 PSD \u043D\u0435 \u043C\u043E\u0436\u0435\u0442 \u0431\u044B\u0442\u044C \u043F\u043E\u0432\u0451\u0440\u043D\u0443\u0442\u044B\u043C.");
+    return null;
+  }
+  if (!node.absoluteBoundingBox) {
+    fail("\u0423 \u0444\u0440\u0435\u0439\u043C\u0430 \u043D\u0435\u0442 \u0433\u0440\u0430\u043D\u0438\u0446 \u2014 \u044D\u043A\u0441\u043F\u043E\u0440\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u043D\u0435\u0447\u0435\u0433\u043E.");
+    return null;
+  }
+  return node;
+}
+async function runPsdExport(message) {
+  const root = validateRoot();
+  if (!root) {
+    return;
+  }
+  const requested = message.scale;
+  const scale = Number.isFinite(requested) ? Math.min(4, Math.max(1, requested)) : 1;
+  let tree;
+  try {
+    tree = buildPsdTree(root, scale);
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+    return;
+  }
+  const maxSide = Math.max(tree.docWidth, tree.docHeight);
+  if (maxSide > PSB_MAX_SIDE) {
+    fail(`\u0425\u043E\u043B\u0441\u0442 ${tree.docWidth}\xD7${tree.docHeight} px \u2014 \u044D\u0442\u043E \u0431\u043E\u043B\u044C\u0448\u0435 \u043F\u0440\u0435\u0434\u0435\u043B\u0430 PSB.`);
+    return;
+  }
+  const psb = maxSide > PSD_MAX_SIDE;
+  if (tree.leaves.length === 0) {
+    fail("\u0412\u043E \u0444\u0440\u0435\u0439\u043C\u0435 \u043D\u0435\u0442 \u0432\u0438\u0434\u0438\u043C\u044B\u0445 \u0441\u043B\u043E\u0451\u0432.");
+    return;
+  }
+  if (tree.leaves.length > MAX_LEAVES) {
+    fail(
+      `\u0421\u043B\u043E\u0451\u0432: ${tree.leaves.length}. \u0411\u043E\u043B\u044C\u0448\u0435 ${MAX_LEAVES} Photoshop \u0438 \u043F\u0430\u043C\u044F\u0442\u044C \u0431\u0440\u0430\u0443\u0437\u0435\u0440\u0430 \u043D\u0435 \u043F\u043E\u0442\u044F\u043D\u0443\u0442 \u2014 \u0440\u0430\u0437\u0431\u0435\u0439\u0442\u0435 \u0444\u0440\u0435\u0439\u043C.`
+    );
+    return;
+  }
+  if (tree.estimatedPixelBytes > MAX_PIXEL_BYTES) {
+    const gb = (tree.estimatedPixelBytes / 1024 / 1024 / 1024).toFixed(1);
+    fail(`\u0421\u043B\u0438\u0448\u043A\u043E\u043C \u043C\u043D\u043E\u0433\u043E \u043F\u0438\u043A\u0441\u0435\u043B\u0435\u0439 (\u2248${gb} \u0413\u0411). \u0423\u043C\u0435\u043D\u044C\u0448\u0438\u0442\u0435 \u043C\u0430\u0441\u0448\u0442\u0430\u0431.`);
+    return;
+  }
+  const current = {
+    id: nextSessionId++,
+    cancelled: false,
+    resolveAck: null
+  };
+  session = current;
+  const warnings = tree.warnings.slice();
+  figma.ui.postMessage({
+    type: "psdExportStructure",
+    sessionId: current.id,
+    docWidth: tree.docWidth,
+    docHeight: tree.docHeight,
+    scale,
+    fileName: sanitizePsdFileName(root.name),
+    psb,
+    leafCount: tree.leaves.length,
+    children: tree.children,
+    warnings: tree.warnings
+  });
+  try {
+    const composite = await root.exportAsync({
+      format: "PNG",
+      constraint: { type: "SCALE", value: scale }
+    });
+    if (session !== current || current.cancelled) {
+      return;
+    }
+    figma.ui.postMessage({
+      type: "psdExportComposite",
+      sessionId: current.id,
+      bytes: composite
+    });
+  } catch (error) {
+    const text = error instanceof Error ? error.message : String(error);
+    warnings.push(`\u041F\u0440\u0435\u0432\u044C\u044E \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u0430 \u043D\u0435 \u0441\u043E\u0431\u0440\u0430\u043D\u043E: ${text}`);
+  }
+  for (let index = 0; index < tree.leaves.length; index++) {
+    if (session !== current || current.cancelled) {
+      return;
+    }
+    const node = tree.leaves[index];
+    let bytes = new Uint8Array(0);
+    let ok = false;
+    let reason;
+    if (node.removed) {
+      reason = "\u0441\u043B\u043E\u0439 \u0443\u0434\u0430\u043B\u0451\u043D \u0432\u043E \u0432\u0440\u0435\u043C\u044F \u044D\u043A\u0441\u043F\u043E\u0440\u0442\u0430";
+    } else {
+      try {
+        bytes = await node.exportAsync({
+          format: "PNG",
+          constraint: { type: "SCALE", value: scale }
+        });
+        ok = true;
+      } catch (error) {
+        reason = error instanceof Error ? error.message : String(error);
+      }
+    }
+    if (session !== current || current.cancelled) {
+      return;
+    }
+    if (!ok) {
+      warnings.push(`${node.name}: ${reason}`);
+    }
+    figma.ui.postMessage({
+      type: "psdExportLayerBytes",
+      sessionId: current.id,
+      index,
+      ok,
+      bytes,
+      reason
+    });
+    await waitForAck(current);
+  }
+  if (session !== current || current.cancelled) {
+    return;
+  }
+  session = null;
+  finish(current.id, true, warnings);
+}
+
 // src/features/rasterize.ts
 async function runRasterize(message) {
   const selection = [...figma.currentPage.selection];
@@ -1146,7 +1591,7 @@ function isPluginMessageFromUi(raw) {
     return false;
   }
   const type = raw.type;
-  return type === "rasterize" || type === "multipleOfFourCheck" || type === "multipleOfFourFix" || type === "renameLayers" || type === "getRecentNamePresets" || type === "setRecentNamePresets" || type === "renamePreset" || type === "addPreset" || type === "removePreset" || type === "movePreset" || type === "resetPresets" || type === "undoPresetEdit" || type === "focusNode" || type === "selectNodes" || type === "requestPluginVersion" || type === "getUpdateBannerDismissed" || type === "setUpdateBannerDismissed";
+  return type === "rasterize" || type === "multipleOfFourCheck" || type === "multipleOfFourFix" || type === "renameLayers" || type === "getRecentNamePresets" || type === "setRecentNamePresets" || type === "renamePreset" || type === "addPreset" || type === "removePreset" || type === "movePreset" || type === "resetPresets" || type === "undoPresetEdit" || type === "focusNode" || type === "selectNodes" || type === "requestPluginVersion" || type === "getUpdateBannerDismissed" || type === "setUpdateBannerDismissed" || type === "psdExportStart" || type === "psdExportLayerAck" || type === "psdExportCancel" || type === "psdExportNotify";
 }
 
 // src/main.ts
@@ -1154,2312 +1599,7 @@ var UPDATE_BANNER_DISMISSED_KEY = "updateBannerDismissedForVersion";
 var RECENT_NAME_PRESETS_KEY = "recentNamePresets";
 var RECENT_NAME_PRESETS_LIMIT = 5;
 var PRESET_TREE_KEY = "layerNamePresetsTree";
-figma.showUI(`<!DOCTYPE html>\r
-<html lang="ru">\r
-  <head>\r
-    <meta charset="utf-8" />\r
-    <title>\u{1F60A} Kids Games Plugin \u{1F60A}</title>\r
-    <style>\r
-      :root {\r
-        --accent: #8b5cf6;\r
-        --accent-hover: #7c3aed;\r
-        --accent-soft: rgba(139, 92, 246, 0.12);\r
-        --radius-sm: 6px;\r
-        --radius-md: 10px;\r
-        --radius-lg: 14px;\r
-        --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);\r
-      }\r
-\r
-      * {\r
-        box-sizing: border-box;\r
-      }\r
-\r
-      body {\r
-        font: 12px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", system-ui,\r
-          sans-serif;\r
-        margin: 0;\r
-        padding: 14px;\r
-        color: var(--figma-color-text);\r
-        background: var(--figma-color-bg);\r
-      }\r
-\r
-      /* \u0421\u0435\u0433\u043C\u0435\u043D\u0442\u0438\u0440\u043E\u0432\u0430\u043D\u043D\u044B\u0435 \u0432\u043A\u043B\u0430\u0434\u043A\u0438 */\r
-      .tabs {\r
-        display: flex;\r
-        gap: 4px;\r
-        padding: 3px;\r
-        margin-bottom: 14px;\r
-        border-radius: var(--radius-md);\r
-        background: var(--figma-color-bg-secondary);\r
-      }\r
-      .tabs button {\r
-        flex: 1;\r
-        margin: 0;\r
-        padding: 7px 4px;\r
-        font-size: 11px;\r
-        white-space: nowrap;\r
-        border: none;\r
-        background: transparent;\r
-        color: var(--figma-color-text-secondary);\r
-        cursor: pointer;\r
-        font: inherit;\r
-        font-weight: 500;\r
-        border-radius: calc(var(--radius-md) - 3px);\r
-        transition: background 0.15s ease, color 0.15s ease;\r
-      }\r
-      .tabs button:hover {\r
-        color: var(--figma-color-text);\r
-      }\r
-      .tabs button[aria-selected="true"] {\r
-        background: var(--figma-color-bg);\r
-        color: var(--figma-color-text);\r
-        box-shadow: var(--shadow-sm);\r
-      }\r
-\r
-      /* \u0421\u0435\u0433\u043C\u0435\u043D\u0442 \xAB\u041E\u0440\u0438\u0433\u0438\u043D\u0430\u043B\xBB */\r
-      .segmented {\r
-        display: flex;\r
-        gap: 2px;\r
-        padding: 3px;\r
-        margin-top: 2px;\r
-        border-radius: var(--radius-md);\r
-        background: var(--figma-color-bg-secondary);\r
-      }\r
-      .segmented button {\r
-        flex: 1;\r
-        margin: 0;\r
-        padding: 7px 6px;\r
-        border: none;\r
-        background: transparent;\r
-        color: var(--figma-color-text-secondary);\r
-        cursor: pointer;\r
-        font: inherit;\r
-        font-size: 11px;\r
-        font-weight: 500;\r
-        border-radius: calc(var(--radius-md) - 3px);\r
-        transition: background 0.15s ease, color 0.15s ease;\r
-      }\r
-      .segmented button:hover {\r
-        color: var(--figma-color-text);\r
-      }\r
-      .segmented button[aria-checked="true"] {\r
-        background: var(--figma-color-bg);\r
-        color: var(--figma-color-text);\r
-        box-shadow: var(--shadow-sm);\r
-      }\r
-\r
-      .panel {\r
-        display: none;\r
-      }\r
-      .panel.is-active {\r
-        display: block;\r
-      }\r
-\r
-      /* \u041F\u043E\u0434\u0441\u043A\u0430\u0437\u043A\u0438 */\r
-      .hint {\r
-        font-size: 11px;\r
-        color: var(--figma-color-text-secondary);\r
-        margin: 0 0 4px;\r
-        line-height: 1.5;\r
-      }\r
-      .hint code {\r
-        font-size: 10.5px;\r
-        padding: 1px 5px;\r
-        border-radius: 4px;\r
-        background: var(--figma-color-bg-secondary);\r
-        font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;\r
-      }\r
-\r
-      /* \u041F\u043E\u043B\u044F */\r
-      .field {\r
-        display: block;\r
-        margin: 14px 0 6px;\r
-        font-weight: 500;\r
-      }\r
-\r
-      select {\r
-        width: 100%;\r
-        padding: 8px 10px;\r
-        border: 1px solid var(--figma-color-border);\r
-        border-radius: var(--radius-sm);\r
-        background: var(--figma-color-bg);\r
-        color: var(--figma-color-text);\r
-        font: inherit;\r
-        cursor: pointer;\r
-      }\r
-      select:focus {\r
-        outline: none;\r
-        border-color: var(--accent);\r
-        box-shadow: 0 0 0 3px var(--accent-soft);\r
-      }\r
-\r
-      /* \u041A\u043D\u043E\u043F\u043A\u0438 */\r
-      .actions-row {\r
-        display: flex;\r
-        gap: 8px;\r
-        margin-top: 12px;\r
-      }\r
-      .actions-row button {\r
-        flex: 1;\r
-      }\r
-\r
-      button.primary,\r
-      button.secondary {\r
-        margin: 0;\r
-        padding: 9px 12px;\r
-        border-radius: var(--radius-sm);\r
-        border: none;\r
-        cursor: pointer;\r
-        font: inherit;\r
-        font-weight: 500;\r
-        transition: background 0.15s ease, transform 0.05s ease;\r
-      }\r
-      button.primary {\r
-        background: var(--accent);\r
-        color: #fff;\r
-      }\r
-      button.primary:hover:not(:disabled) {\r
-        background: var(--accent-hover);\r
-      }\r
-      button.primary:active:not(:disabled) {\r
-        transform: translateY(0.5px);\r
-      }\r
-      button.secondary {\r
-        background: var(--figma-color-bg-secondary);\r
-        color: var(--figma-color-text);\r
-      }\r
-      button.secondary:hover:not(:disabled) {\r
-        background:\r
-          linear-gradient(var(--accent-soft), var(--accent-soft)),\r
-          var(--figma-color-bg-hover);\r
-      }\r
-      button.action-full {\r
-        width: 100%;\r
-        margin-top: 14px;\r
-      }\r
-      button:disabled {\r
-        opacity: 0.5;\r
-        cursor: not-allowed;\r
-      }\r
-\r
-      /* \u0421\u0442\u0430\u0442\u0443\u0441 */\r
-      .status {\r
-        margin-top: 12px;\r
-        padding: 8px 10px;\r
-        border-radius: var(--radius-sm);\r
-        background: var(--figma-color-bg-secondary);\r
-        color: var(--figma-color-text-secondary);\r
-        font-size: 11px;\r
-        white-space: pre-wrap;\r
-        max-height: 92px;\r
-        overflow-y: auto;\r
-      }\r
-      .status:empty {\r
-        display: none;\r
-      }\r
-\r
-      /* \u041B\u043E\u0433 \u0434\u0438\u0430\u0433\u043D\u043E\u0441\u0442\u0438\u043A\u0438 */\r
-      .debug-text {\r
-        width: 100%;\r
-        box-sizing: border-box;\r
-        margin-bottom: 8px;\r
-        padding: 8px 10px;\r
-        border: 1px solid var(--figma-color-border);\r
-        border-radius: var(--radius-sm);\r
-        background: var(--figma-color-bg-secondary);\r
-        color: var(--figma-color-text-secondary);\r
-        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\r
-        font-size: 10px;\r
-        line-height: 1.45;\r
-        white-space: pre;\r
-        resize: vertical;\r
-      }\r
-\r
-      /* \u0421\u043F\u0438\u0441\u043E\u043A \u043D\u0430\u0440\u0443\u0448\u0435\u043D\u0438\u0439 */\r
-      .list-wrap {\r
-        margin-top: 12px;\r
-        border-radius: var(--radius-sm);\r
-        background: var(--figma-color-bg-secondary);\r
-        overflow: hidden;\r
-      }\r
-      .list-header {\r
-        display: flex;\r
-        align-items: center;\r
-        justify-content: space-between;\r
-        gap: 8px;\r
-        padding: 6px 10px;\r
-        font-size: 10px;\r
-        font-weight: 600;\r
-        color: var(--figma-color-text-secondary);\r
-        text-transform: uppercase;\r
-        letter-spacing: 0.5px;\r
-      }\r
-      .list-header button.linkish {\r
-        margin: 0;\r
-        padding: 4px 8px;\r
-        border: none;\r
-        background: transparent;\r
-        color: var(--accent);\r
-        cursor: pointer;\r
-        font: inherit;\r
-        font-size: 11px;\r
-        font-weight: 500;\r
-        text-transform: none;\r
-        letter-spacing: 0;\r
-        border-radius: 4px;\r
-        transition: background 0.15s ease, opacity 0.15s ease;\r
-      }\r
-      .list-header button.linkish:hover:not(:disabled) {\r
-        background: var(--accent-soft);\r
-      }\r
-      .list-header button.linkish:disabled {\r
-        opacity: 0.4;\r
-        cursor: not-allowed;\r
-      }\r
-      .list-body {\r
-        max-height: 160px;\r
-        overflow-y: auto;\r
-        background: var(--figma-color-bg);\r
-      }\r
-      .list-empty {\r
-        padding: 16px 10px;\r
-        color: var(--figma-color-text-secondary);\r
-        font-size: 11px;\r
-        text-align: center;\r
-        line-height: 1.5;\r
-      }\r
-      .list-item {\r
-        display: flex;\r
-        align-items: center;\r
-        gap: 8px;\r
-        padding: 8px 10px;\r
-        border-bottom: 1px solid var(--figma-color-border);\r
-        cursor: pointer;\r
-        transition: background 0.15s ease;\r
-      }\r
-      .list-item:hover {\r
-        background: var(--figma-color-bg-hover);\r
-      }\r
-      .list-item:last-child {\r
-        border-bottom: none;\r
-      }\r
-      .list-item-main {\r
-        flex: 1;\r
-        min-width: 0;\r
-      }\r
-      .list-item-name {\r
-        font-weight: 500;\r
-        overflow: hidden;\r
-        text-overflow: ellipsis;\r
-        white-space: nowrap;\r
-      }\r
-      .list-item-meta {\r
-        font-size: 11px;\r
-        color: var(--figma-color-text-secondary);\r
-        margin-top: 2px;\r
-      }\r
-      .list-item button.linkish {\r
-        flex-shrink: 0;\r
-        margin: 0;\r
-        padding: 4px 8px;\r
-        border: none;\r
-        background: transparent;\r
-        color: var(--accent);\r
-        cursor: pointer;\r
-        font: inherit;\r
-        font-weight: 500;\r
-        border-radius: 4px;\r
-        transition: background 0.15s ease;\r
-      }\r
-      .list-item button.linkish:hover {\r
-        background: var(--accent-soft);\r
-      }\r
-\r
-      /* \u0412\u043A\u043B\u0430\u0434\u043A\u0430 \xAB\u0420\u0435\u043D\u0435\u0439\u043C\u0438\u043D\u0433\xBB: \u043F\u043E\u0438\u0441\u043A, \u043D\u0435\u0434\u0430\u0432\u043D\u0438\u0435, \u0434\u0435\u0440\u0435\u0432\u043E \u043F\u0440\u0435\u0441\u0435\u0442\u043E\u0432 */\r
-      .search-input.names-search-first {\r
-        margin-top: 0;\r
-      }\r
-      .search-input {\r
-        width: 100%;\r
-        margin-top: 10px;\r
-        padding: 7px 10px;\r
-        border: 1px solid var(--figma-color-border);\r
-        border-radius: var(--radius-sm);\r
-        background: var(--figma-color-bg);\r
-        color: var(--figma-color-text);\r
-        font: inherit;\r
-      }\r
-      .search-input::placeholder {\r
-        color: var(--figma-color-text-secondary);\r
-      }\r
-      .search-input:focus {\r
-        outline: none;\r
-        border-color: var(--accent);\r
-        box-shadow: 0 0 0 3px var(--accent-soft);\r
-      }\r
-\r
-      /* \u0421\u0442\u0430\u0440\u0442\u043E\u0432\u044B\u0439 \u043D\u043E\u043C\u0435\u0440 \u0441\u0447\u0451\u0442\u0447\u0438\u043A\u0430 \u2014 \u0441\u0442\u043E\u0438\u0442 \u0432\u043F\u043B\u043E\u0442\u043D\u0443\u044E \u043A \u043F\u043E\u043B\u043E\u0441\u0435 \u043F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440\u0430,\r
-         \u043A\u043E\u0442\u043E\u0440\u0430\u044F \u0435\u0433\u043E \u0438 \u043E\u0442\u0440\u0430\u0436\u0430\u0435\u0442. */\r
-      .names-start {\r
-        display: flex;\r
-        align-items: center;\r
-        gap: 8px;\r
-        margin-top: 12px;\r
-      }\r
-      .names-start-label {\r
-        color: var(--figma-color-text-secondary);\r
-        font-size: 11px;\r
-      }\r
-      .names-start-input {\r
-        width: 64px;\r
-        padding: 5px 8px;\r
-        border: 1px solid var(--figma-color-border);\r
-        border-radius: var(--radius-sm);\r
-        background: var(--figma-color-bg);\r
-        color: var(--figma-color-text);\r
-        font: inherit;\r
-      }\r
-      .names-start-input:focus {\r
-        outline: none;\r
-        border-color: var(--accent);\r
-        box-shadow: 0 0 0 3px var(--accent-soft);\r
-      }\r
-\r
-      .recent {\r
-        display: none;\r
-        margin-top: 8px;\r
-      }\r
-      .recent.is-visible {\r
-        display: block;\r
-      }\r
-      .recent-title {\r
-        font-size: 10px;\r
-        font-weight: 600;\r
-        color: var(--figma-color-text-secondary);\r
-        text-transform: uppercase;\r
-        letter-spacing: 0.5px;\r
-      }\r
-      .chips {\r
-        display: flex;\r
-        flex-wrap: wrap;\r
-        gap: 4px;\r
-        margin-top: 5px;\r
-      }\r
-      .chip {\r
-        margin: 0;\r
-        padding: 3px 9px;\r
-        border: 1px solid var(--figma-color-border);\r
-        border-radius: 999px;\r
-        background: var(--figma-color-bg);\r
-        color: var(--figma-color-text);\r
-        cursor: pointer;\r
-        font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;\r
-        font-size: 10.5px;\r
-        transition: background 0.15s ease, border-color 0.15s ease;\r
-      }\r
-      .chip:hover {\r
-        border-color: var(--accent);\r
-        background: var(--accent-soft);\r
-      }\r
-\r
-      .tree {\r
-        margin-top: 10px;\r
-        border-radius: var(--radius-sm);\r
-        background: var(--figma-color-bg-secondary);\r
-        overflow: hidden;\r
-      }\r
-      .tree-count {\r
-        font-weight: 500;\r
-        text-transform: none;\r
-        letter-spacing: 0;\r
-        color: var(--figma-color-text-secondary);\r
-      }\r
-      .tree-count.is-ready {\r
-        color: var(--accent);\r
-      }\r
-      .tree-body {\r
-        max-height: 270px;\r
-        padding: 4px 0;\r
-        overflow-y: auto;\r
-        background: var(--figma-color-bg);\r
-      }\r
-      .tree-row {\r
-        display: flex;\r
-        align-items: center;\r
-        gap: 2px;\r
-        padding-right: 6px;\r
-        padding-left: calc(4px + var(--depth) * 12px);\r
-        /* \u041D\u0430\u043F\u0440\u0430\u0432\u043B\u044F\u044E\u0449\u0438\u0435 \u0432\u043B\u043E\u0436\u0435\u043D\u043D\u043E\u0441\u0442\u0438: \u043F\u043E 1px \u043B\u0438\u043D\u0438\u0438 \u043D\u0430 \u043A\u0430\u0436\u0434\u044B\u0439 \u0443\u0440\u043E\u0432\u0435\u043D\u044C \u043E\u0442\u0441\u0442\u0443\u043F\u0430. */\r
-        background-image: repeating-linear-gradient(\r
-          to right,\r
-          var(--figma-color-border) 0 1px,\r
-          transparent 1px 12px\r
-        );\r
-        background-repeat: no-repeat;\r
-        background-position: 11px 0;\r
-        background-size: calc(var(--depth) * 12px) 100%;\r
-        transition: background-color 0.12s ease;\r
-      }\r
-      .tree-row:hover,\r
-      .tree-row:focus-within {\r
-        background-color: var(--figma-color-bg-hover);\r
-      }\r
-      .tree-toggle {\r
-        flex: 0 0 20px;\r
-        width: 20px;\r
-        height: 26px;\r
-        margin: 0;\r
-        padding: 0;\r
-        display: flex;\r
-        align-items: center;\r
-        justify-content: center;\r
-        border: none;\r
-        border-radius: 4px;\r
-        background: transparent;\r
-        color: var(--figma-color-text-secondary);\r
-        cursor: pointer;\r
-        font: inherit;\r
-      }\r
-      .tree-toggle svg {\r
-        transition: transform 0.12s ease;\r
-      }\r
-      .tree-toggle[aria-expanded="true"] svg {\r
-        transform: rotate(90deg);\r
-      }\r
-      .tree-toggle:hover {\r
-        color: var(--figma-color-text);\r
-      }\r
-      .tree-toggle.is-leaf {\r
-        visibility: hidden;\r
-        pointer-events: none;\r
-      }\r
-      .tree-apply {\r
-        flex: 1;\r
-        min-width: 0;\r
-        margin: 0;\r
-        padding: 5px 7px;\r
-        border: none;\r
-        border-radius: 5px;\r
-        background: transparent;\r
-        color: var(--figma-color-text);\r
-        cursor: pointer;\r
-        text-align: left;\r
-        font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;\r
-        font-size: 11px;\r
-        white-space: nowrap;\r
-        overflow: hidden;\r
-        text-overflow: ellipsis;\r
-      }\r
-      .tree-apply.is-group {\r
-        font-weight: 600;\r
-      }\r
-      .tree-apply.is-leaf {\r
-        color: var(--figma-color-text-secondary);\r
-      }\r
-      .tree-apply:focus-visible {\r
-        outline: none;\r
-        box-shadow: inset 0 0 0 1px var(--accent);\r
-      }\r
-      /* \u0421\u0432\u043E\u0439 \u0442\u0438\u043F: \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D \u0438\u043B\u0438 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u043D \u043E\u0442\u043D\u043E\u0441\u0438\u0442\u0435\u043B\u044C\u043D\u043E \u0441\u0442\u0430\u043D\u0434\u0430\u0440\u0442\u043D\u043E\u0433\u043E \u043D\u0430\u0431\u043E\u0440\u0430. */\r
-      .tree-apply.is-custom::after {\r
-        content: "";\r
-        display: inline-block;\r
-        width: 4px;\r
-        height: 4px;\r
-        margin-left: 6px;\r
-        border-radius: 50%;\r
-        vertical-align: middle;\r
-        background: var(--accent);\r
-      }\r
-      .tree-empty {\r
-        padding: 16px 10px;\r
-        color: var(--figma-color-text-secondary);\r
-        font-size: 11px;\r
-        text-align: center;\r
-      }\r
-\r
-      /* \u0420\u0435\u0436\u0438\u043C \u043F\u0440\u0430\u0432\u043A\u0438 \u0434\u0435\u0440\u0435\u0432\u0430 */\r
-      .tree-header-right {\r
-        display: flex;\r
-        align-items: center;\r
-        gap: 8px;\r
-      }\r
-      .tree-editbar {\r
-        display: none;\r
-        gap: 4px;\r
-        align-items: center;\r
-        padding: 0 6px 6px;\r
-        background: var(--figma-color-bg-secondary);\r
-      }\r
-      .tree.is-editing .tree-editbar {\r
-        display: flex;\r
-      }\r
-      .tree-editbar .confirm-text {\r
-        font-size: 10.5px;\r
-        color: var(--figma-color-text-secondary);\r
-        margin-left: auto;\r
-      }\r
-      .tree-actions {\r
-        display: none;\r
-        flex: 0 0 auto;\r
-        gap: 1px;\r
-        /* \u041F\u0440\u0438\u0433\u043B\u0443\u0448\u0435\u043D\u044B, \u043F\u043E\u043A\u0430 \u0441\u0442\u0440\u043E\u043A\u0430 \u043D\u0435 \u043F\u043E\u0434 \u043A\u0443\u0440\u0441\u043E\u0440\u043E\u043C: 71 \u0441\u0442\u0440\u043E\u043A\u0430 \u0438\u043D\u0430\u0447\u0435 \u0440\u044F\u0431\u0438\u0442. */\r
-        opacity: 0.4;\r
-        transition: opacity 0.12s ease;\r
-      }\r
-      .tree.is-editing .tree-actions {\r
-        display: flex;\r
-      }\r
-      .tree-row:hover .tree-actions,\r
-      .tree-row:focus-within .tree-actions {\r
-        opacity: 1;\r
-      }\r
-      .icon-btn {\r
-        display: flex;\r
-        align-items: center;\r
-        justify-content: center;\r
-        width: 24px;\r
-        height: 24px;\r
-        margin: 0;\r
-        padding: 0;\r
-        border: none;\r
-        border-radius: 5px;\r
-        background: transparent;\r
-        color: var(--figma-color-text-secondary);\r
-        cursor: pointer;\r
-        font: inherit;\r
-        transition: background 0.12s ease, color 0.12s ease;\r
-      }\r
-      .icon-btn:hover {\r
-        background: var(--figma-color-bg-secondary);\r
-        color: var(--figma-color-text);\r
-      }\r
-      .icon-btn:focus-visible {\r
-        outline: none;\r
-        box-shadow: 0 0 0 2px var(--accent-soft);\r
-        color: var(--figma-color-text);\r
-      }\r
-      .icon-btn.is-danger:hover {\r
-        background: rgba(239, 68, 68, 0.16);\r
-        color: #ef4444;\r
-      }\r
-      .tree-confirm {\r
-        display: flex;\r
-        align-items: center;\r
-        gap: 6px;\r
-        flex: 1;\r
-        min-width: 0;\r
-        padding: 3px 6px;\r
-        font-size: 10.5px;\r
-        color: var(--figma-color-text-secondary);\r
-      }\r
-      .tree-confirm span {\r
-        overflow: hidden;\r
-        text-overflow: ellipsis;\r
-        white-space: nowrap;\r
-      }\r
-      .tree-confirm button {\r
-        flex: 0 0 auto;\r
-        margin: 0;\r
-        padding: 2px 7px;\r
-        border: none;\r
-        border-radius: 4px;\r
-        background: var(--figma-color-bg-secondary);\r
-        color: var(--figma-color-text);\r
-        cursor: pointer;\r
-        font: inherit;\r
-        font-size: 10.5px;\r
-      }\r
-      .tree-confirm button.is-danger {\r
-        background: rgba(239, 68, 68, 0.16);\r
-        color: #ef4444;\r
-      }\r
-      .tree-input {\r
-        flex: 1;\r
-        min-width: 0;\r
-        padding: 3px 6px;\r
-        border: 1px solid var(--accent);\r
-        border-radius: 5px;\r
-        background: var(--figma-color-bg);\r
-        color: var(--figma-color-text);\r
-        font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;\r
-        font-size: 11px;\r
-      }\r
-      .tree-input:focus {\r
-        outline: none;\r
-        box-shadow: 0 0 0 3px var(--accent-soft);\r
-      }\r
-\r
-      /* \u041F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440 \u2014 \u0440\u0430\u043C\u043A\u0430 \u0431\u0435\u0437 \u0437\u0430\u043B\u0438\u0432\u043A\u0438, \u0441\u0442\u0430\u0442\u0443\u0441 \u2014 \u0437\u0430\u043B\u0438\u0432\u043A\u0430. \u0420\u0430\u043D\u044C\u0448\u0435 \u0443 \u043E\u0431\u043E\u0438\u0445 \u0431\u044B\u043B\r
-         \u043E\u0434\u0438\u043D\u0430\u043A\u043E\u0432\u044B\u0439 \u0444\u043E\u043D, \u0438 \u043E\u043D\u0438 \u0447\u0438\u0442\u0430\u043B\u0438\u0441\u044C \u043A\u0430\u043A \u043E\u0434\u043D\u0430 \u0441\u0435\u0440\u0430\u044F \u043F\u043B\u0438\u0442\u0430. */\r
-      .preview {\r
-        margin-top: 8px;\r
-        padding: 6px 10px;\r
-        border: 1px solid var(--figma-color-border);\r
-        border-radius: var(--radius-sm);\r
-        background: transparent;\r
-        color: var(--figma-color-text-secondary);\r
-        font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;\r
-        font-size: 10.5px;\r
-        line-height: 16px;\r
-        min-height: 30px;\r
-        white-space: nowrap;\r
-        overflow: hidden;\r
-        text-overflow: ellipsis;\r
-      }\r
-      .preview.is-active {\r
-        border-color: var(--accent);\r
-        background: var(--accent-soft);\r
-        color: var(--figma-color-text);\r
-      }\r
-\r
-      /* \u0421\u0442\u0440\u043E\u043A\u0430 \u0441\u0442\u0430\u0442\u0443\u0441\u0430 \u0441 \u0441\u0441\u044B\u043B\u043A\u043E\u0439 \xAB\u041E\u0442\u043C\u0435\u043D\u0438\u0442\u044C\xBB \u0441\u043F\u0440\u0430\u0432\u0430. */\r
-      .status-row {\r
-        display: flex;\r
-        align-items: flex-start;\r
-        gap: 8px;\r
-        margin-top: 10px;\r
-        min-height: 34px;\r
-      }\r
-      .status-row .status {\r
-        flex: 1;\r
-        min-width: 0;\r
-        margin-top: 0;\r
-      }\r
-      .status-row .status:empty {\r
-        display: block;\r
-        background: transparent;\r
-      }\r
-      #namesUndo {\r
-        display: none;\r
-        flex: 0 0 auto;\r
-        margin: 0;\r
-        padding: 8px 10px;\r
-        border: 1px solid var(--figma-color-border);\r
-        border-radius: var(--radius-sm);\r
-        background: var(--figma-color-bg);\r
-        color: var(--accent);\r
-        cursor: pointer;\r
-        font: inherit;\r
-        font-size: 11px;\r
-        font-weight: 500;\r
-      }\r
-      #namesUndo.is-visible {\r
-        display: block;\r
-      }\r
-      #namesUndo:hover {\r
-        background: var(--accent-soft);\r
-        border-color: var(--accent);\r
-      }\r
-\r
-      /* \xAB\u041A\u0430\u043A \u044D\u0442\u043E \u0440\u0430\u0431\u043E\u0442\u0430\u0435\u0442\xBB */\r
-      details {\r
-        margin-top: 14px;\r
-        font-size: 11px;\r
-        color: var(--figma-color-text-secondary);\r
-      }\r
-      details summary {\r
-        cursor: pointer;\r
-        color: var(--figma-color-text);\r
-        padding: 6px 0;\r
-        list-style: none;\r
-        font-weight: 500;\r
-        user-select: none;\r
-      }\r
-      details summary::-webkit-details-marker {\r
-        display: none;\r
-      }\r
-      details summary::before {\r
-        content: "\u203A";\r
-        display: inline-block;\r
-        width: 12px;\r
-        margin-right: 4px;\r
-        color: var(--figma-color-text-secondary);\r
-        transition: transform 0.15s ease;\r
-      }\r
-      details[open] summary::before {\r
-        transform: rotate(90deg);\r
-      }\r
-      details ul {\r
-        margin: 4px 0 0;\r
-        padding-left: 18px;\r
-      }\r
-      details li {\r
-        margin: 4px 0;\r
-        line-height: 1.5;\r
-      }\r
-      details code {\r
-        font-size: 10.5px;\r
-        padding: 1px 5px;\r
-        border-radius: 4px;\r
-        background: var(--figma-color-bg-secondary);\r
-        font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;\r
-      }\r
-\r
-      /* \u0411\u0430\u043D\u043D\u0435\u0440 \u043E\u0431\u043D\u043E\u0432\u043B\u0435\u043D\u0438\u044F */\r
-      .update-banner {\r
-        display: none;\r
-        margin: 0 0 12px;\r
-        padding: 10px 10px 10px 12px;\r
-        border-radius: var(--radius-md);\r
-        border: 1px solid var(--figma-color-border);\r
-        background: var(--figma-color-bg-secondary);\r
-        font-size: 11px;\r
-        line-height: 1.5;\r
-        color: var(--figma-color-text);\r
-      }\r
-      .update-banner.is-visible {\r
-        display: block;\r
-      }\r
-      .update-banner p {\r
-        margin: 0 0 8px;\r
-      }\r
-      .update-banner code {\r
-        font-size: 10.5px;\r
-        padding: 1px 5px;\r
-        border-radius: 4px;\r
-        background: var(--figma-color-bg);\r
-        font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;\r
-      }\r
-      .update-banner-actions {\r
-        display: flex;\r
-        align-items: center;\r
-        justify-content: flex-end;\r
-        gap: 8px;\r
-        margin-top: 2px;\r
-      }\r
-      .update-banner-actions button.linkish {\r
-        margin: 0;\r
-        padding: 4px 8px;\r
-        border: none;\r
-        background: transparent;\r
-        color: var(--figma-color-text-secondary);\r
-        cursor: pointer;\r
-        font: inherit;\r
-        font-size: 11px;\r
-        font-weight: 500;\r
-        border-radius: 4px;\r
-      }\r
-      .update-banner-actions button.linkish:hover {\r
-        background: var(--figma-color-bg-hover);\r
-        color: var(--figma-color-text);\r
-      }\r
-\r
-      .plugin-version-footer {\r
-        margin: 14px 0 0;\r
-        padding-top: 10px;\r
-        border-top: 1px solid var(--figma-color-border);\r
-        font-size: 10px;\r
-        color: var(--figma-color-text-secondary);\r
-        font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;\r
-      }\r
-    </style>\r
-  </head>\r
-  <body>\r
-    <div\r
-      id="updateBanner"\r
-      class="update-banner"\r
-      role="status"\r
-      aria-live="polite"\r
-    >\r
-      <p id="updateBannerBody"></p>\r
-      <div class="update-banner-actions">\r
-        <button type="button" class="linkish" id="updateBannerDismiss">\u0421\u043A\u0440\u044B\u0442\u044C</button>\r
-      </div>\r
-    </div>\r
-\r
-    <div class="tabs" role="tablist" aria-label="\u0420\u0430\u0437\u0434\u0435\u043B\u044B \u043F\u043B\u0430\u0433\u0438\u043D\u0430">\r
-      <button\r
-        type="button"\r
-        role="tab"\r
-        id="tabRaster"\r
-        aria-selected="true"\r
-        aria-controls="panelRaster"\r
-      >\r
-        \u0420\u0430\u0441\u0442\u0440\r
-      </button>\r
-      <button\r
-        type="button"\r
-        role="tab"\r
-        id="tabMo4"\r
-        aria-selected="false"\r
-        aria-controls="panelMo4"\r
-      >\r
-        \u041A\u0440\u0430\u0442\u043D\u043E\u0441\u0442\u044C 4\r
-      </button>\r
-      <button\r
-        type="button"\r
-        role="tab"\r
-        id="tabNames"\r
-        aria-selected="false"\r
-        aria-controls="panelNames"\r
-      >\r
-        \u0420\u0435\u043D\u0435\u0439\u043C\u0438\u043D\u0433\r
-      </button>\r
-    </div>\r
-\r
-    <div\r
-      id="panelRaster"\r
-      class="panel is-active"\r
-      role="tabpanel"\r
-      aria-labelledby="tabRaster"\r
-    >\r
-      <p class="hint">\r
-        \u041F\u0440\u0435\u0432\u0440\u0430\u0449\u0430\u0435\u0442 \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u043D\u044B\u0439 \u0441\u043B\u043E\u0439 \u0432 PNG \u043F\u0440\u044F\u043C\u043E \u043D\u0430 \u043A\u0430\u043D\u0432\u0430\u0441\u0435 \u2014 \u043F\u0440\u044F\u043C\u043E\u0443\u0433\u043E\u043B\u044C\u043D\u0438\u043A\r
-        \u0441 \u043A\u0430\u0440\u0442\u0438\u043D\u043A\u043E\u0439-\u0437\u0430\u043B\u0438\u0432\u043A\u043E\u0439.\r
-      </p>\r
-\r
-      <label class="field" for="scale">\u041C\u0430\u0441\u0448\u0442\u0430\u0431</label>\r
-      <select id="scale" aria-label="\u041C\u0430\u0441\u0448\u0442\u0430\u0431 \u044D\u043A\u0441\u043F\u043E\u0440\u0442\u0430">\r
-        <option value="1">1\xD7</option>\r
-        <option value="2">2\xD7</option>\r
-        <option value="3">3\xD7</option>\r
-        <option value="4">4\xD7</option>\r
-      </select>\r
-\r
-      <div class="field" id="originalDispositionLabel">\u041E\u0440\u0438\u0433\u0438\u043D\u0430\u043B</div>\r
-      <div\r
-        class="segmented"\r
-        id="originalDisposition"\r
-        role="radiogroup"\r
-        aria-labelledby="originalDispositionLabel"\r
-      >\r
-        <button type="button" role="radio" aria-checked="true" data-value="keep" tabindex="0">\r
-          \u041E\u0441\u0442\u0430\u0432\u0438\u0442\u044C\r
-        </button>\r
-        <button type="button" role="radio" aria-checked="false" data-value="replace" tabindex="-1">\r
-          \u0417\u0430\u043C\u0435\u043D\u0438\u0442\u044C\r
-        </button>\r
-        <button type="button" role="radio" aria-checked="false" data-value="hide" tabindex="-1">\r
-          \u0421\u043A\u0440\u044B\u0442\u044C\r
-        </button>\r
-      </div>\r
-\r
-      <button type="button" class="primary action-full" id="goRaster">\u0412 \u0440\u0430\u0441\u0442\u0440</button>\r
-      <div class="status" id="rasterStatus" role="status"></div>\r
-    </div>\r
-\r
-    <div id="panelMo4" class="panel" role="tabpanel" aria-labelledby="tabMo4">\r
-      <p class="hint">\r
-        \u041F\u0440\u043E\u0432\u0435\u0440\u044F\u0435\u0442, \u0447\u0442\u043E \u0448\u0438\u0440\u0438\u043D\u0430 \u0438 \u0432\u044B\u0441\u043E\u0442\u0430 \u0441\u043B\u043E\u044F \u043A\u0440\u0430\u0442\u043D\u044B 4. \u0421\u0447\u0438\u0442\u0430\u0435\u0442 \u043F\u043E \u0432\u0438\u0437\u0443\u0430\u043B\u044C\u043D\u043E\u043C\u0443\r
-        \u0431\u043E\u043A\u0441\u0443 \u2014 \u0441 \u0443\u0447\u0451\u0442\u043E\u043C \u0442\u0435\u043D\u0435\u0439, \u043E\u0431\u0432\u043E\u0434\u043E\u043A \u0438 \u0440\u0430\u0437\u043C\u044B\u0442\u0438\u0439.\r
-      </p>\r
-\r
-      <div class="actions-row">\r
-        <button type="button" class="secondary" id="mo4Check">\u041F\u0440\u043E\u0432\u0435\u0440\u0438\u0442\u044C</button>\r
-        <button type="button" class="primary" id="mo4Fix">\u041F\u043E\u043F\u0440\u0430\u0432\u0438\u0442\u044C</button>\r
-      </div>\r
-\r
-      <div class="list-wrap" aria-label="\u0421\u043F\u0438\u0441\u043E\u043A \u043D\u0430\u0440\u0443\u0448\u0435\u043D\u0438\u0439">\r
-        <div class="list-header">\r
-          <span id="mo4ListTitle">\u0421\u043B\u043E\u0438 \u0441 \u043D\u0430\u0440\u0443\u0448\u0435\u043D\u0438\u0435\u043C</span>\r
-          <button\r
-            type="button"\r
-            class="linkish"\r
-            id="mo4SelectAll"\r
-            disabled\r
-            aria-label="\u0412\u044B\u0434\u0435\u043B\u0438\u0442\u044C \u0432\u0441\u0435 \u0441\u043B\u043E\u0438 \u0441 \u043D\u0430\u0440\u0443\u0448\u0435\u043D\u0438\u0435\u043C"\r
-          >\r
-            \u0412\u044B\u0434\u0435\u043B\u0438\u0442\u044C \u0432\u0441\u0435\r
-          </button>\r
-        </div>\r
-        <div class="list-body" id="mo4ListBody"></div>\r
-      </div>\r
-\r
-      <div class="status" id="mo4Status" role="status"></div>\r
-\r
-      <details>\r
-        <summary>\u041A\u0430\u043A \u044D\u0442\u043E \u0440\u0430\u0431\u043E\u0442\u0430\u0435\u0442</summary>\r
-        <ul>\r
-          <li>\r
-            <b>\u041F\u0440\u043E\u0432\u0435\u0440\u0438\u0442\u044C</b> \u043E\u0441\u0442\u0430\u0432\u0438\u0442 \u0432 \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u0438 \u0442\u043E\u043B\u044C\u043A\u043E \u0442\u0435 \u0441\u043B\u043E\u0438, \u0447\u044C\u0438 \u0440\u0430\u0437\u043C\u0435\u0440\u044B\r
-            \u043D\u0435 \u043A\u0440\u0430\u0442\u043D\u044B 4, \u0438 \u043F\u043E\u043A\u0430\u0436\u0435\u0442 \u0438\u0445 \u0441\u043F\u0438\u0441\u043A\u043E\u043C.\r
-          </li>\r
-          <li>\r
-            <b>\u041F\u043E\u043F\u0440\u0430\u0432\u0438\u0442\u044C</b> \u043E\u0431\u043E\u0440\u0430\u0447\u0438\u0432\u0430\u0435\u0442 \u0441\u043B\u043E\u0439 \u0444\u0440\u0435\u0439\u043C\u043E\u043C \u043D\u0443\u0436\u043D\u043E\u0433\u043E \u0440\u0430\u0437\u043C\u0435\u0440\u0430. \u0421\u0430\u043C\u0430\r
-            \u0433\u0440\u0430\u0444\u0438\u043A\u0430 \u043D\u0435 \u0440\u0430\u0441\u0442\u044F\u0433\u0438\u0432\u0430\u0435\u0442\u0441\u044F: \u043C\u0435\u043D\u044F\u0435\u0442\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440, \u0430\r
-            \u0441\u043E\u0434\u0435\u0440\u0436\u0438\u043C\u043E\u0435 \u0441\u0434\u0432\u0438\u0433\u0430\u0435\u0442\u0441\u044F \u0432\u043D\u0443\u0442\u0440\u0438 \u0442\u0430\u043A, \u0447\u0442\u043E\u0431\u044B \u0432\u0438\u0437\u0443\u0430\u043B\u044C\u043D\u043E \u043E\u0441\u0442\u0430\u0442\u044C\u0441\u044F \u043D\u0430 \u043C\u0435\u0441\u0442\u0435.\r
-          </li>\r
-          <li>\r
-            \u041F\u043E\u0441\u043B\u0435 \u041F\u043E\u043F\u0440\u0430\u0432\u0438\u0442\u044C \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u044B \u043E\u0431\u0451\u0440\u0442\u043A\u0438. \u0418\u0441\u0445\u043E\u0434\u043D\u044B\u0439 \u0441\u043B\u043E\u0439 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u043D\r
-            \u0432 <code>[no4] \u0438\u043C\u044F</code> \u2014 \u0447\u0442\u043E\u0431\u044B \u0432\u0438\u0434\u043D\u043E \u0431\u044B\u043B\u043E, \u043A\u0430\u043A\u0438\u0435 \u0441\u043B\u043E\u0438 \u0438\u0437\u043D\u0430\u0447\u0430\u043B\u044C\u043D\u043E\r
-            \u043D\u0435 \u043F\u0440\u043E\u0445\u043E\u0434\u0438\u043B\u0438 \u043F\u0440\u043E\u0432\u0435\u0440\u043A\u0443.\r
-          </li>\r
-        </ul>\r
-      </details>\r
-\r
-      <details id="mo4DebugWrap" hidden>\r
-        <summary>\u0414\u0438\u0430\u0433\u043D\u043E\u0441\u0442\u0438\u043A\u0430</summary>\r
-        <p class="hint">\r
-          \u041B\u043E\u0433 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0433\u043E \u0437\u0430\u043F\u0443\u0441\u043A\u0430 \u041F\u043E\u043F\u0440\u0430\u0432\u0438\u0442\u044C. \u0415\u0441\u043B\u0438 \u043E\u0431\u0451\u0440\u0442\u043A\u0430 \u0432\u0441\u0442\u0430\u043B\u0430 \u043D\u0435 \u0442\u0443\u0434\u0430 \u2014\r
-          \u0441\u043A\u043E\u043F\u0438\u0440\u0443\u0439\u0442\u0435 \u0438 \u043F\u0440\u0438\u0448\u043B\u0438\u0442\u0435.\r
-        </p>\r
-        <textarea\r
-          id="mo4DebugText"\r
-          class="debug-text"\r
-          readonly\r
-          rows="8"\r
-          aria-label="\u041B\u043E\u0433 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0433\u043E \u0437\u0430\u043F\u0443\u0441\u043A\u0430"\r
-        ></textarea>\r
-        <button type="button" class="secondary action-full" id="mo4DebugCopy">\r
-          \u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u0442\u044C\r
-        </button>\r
-      </details>\r
-    </div>\r
-\r
-    <div id="panelNames" class="panel" role="tabpanel" aria-labelledby="tabNames">\r
-      <!-- \u041E\u0442\u0434\u0435\u043B\u044C\u043D\u043E\u0439 \u043F\u043E\u0434\u0441\u043A\u0430\u0437\u043A\u0438 \u043D\u0435\u0442: \u043F\u043E\u043B\u043E\u0441\u0430 \u043F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440\u0430 \u043D\u0430\u0434 \u0441\u0442\u0430\u0442\u0443\u0441\u043E\u043C \u0433\u043E\u0432\u043E\u0440\u0438\u0442\r
-           \u0442\u043E \u0436\u0435 \u0441\u0430\u043C\u043E\u0435 \u0438 \u0432\u0441\u0435\u0433\u0434\u0430 \u0430\u043A\u0442\u0443\u0430\u043B\u044C\u043D\u044B\u043C \u0447\u0438\u0441\u043B\u043E\u043C \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u043D\u044B\u0445 \u0441\u043B\u043E\u0451\u0432. -->\r
-      <input\r
-        type="search"\r
-        class="search-input names-search-first"\r
-        id="namesSearch"\r
-        placeholder="\u041F\u043E\u0438\u0441\u043A \u043F\u043E \u0442\u0438\u043F\u0430\u043C \u2014 Eyes, Hair, Dress\u2026"\r
-        aria-label="\u041F\u043E\u0438\u0441\u043A \u043F\u043E \u0442\u0438\u043F\u0430\u043C"\r
-        autocomplete="off"\r
-      />\r
-\r
-      <div class="recent" id="namesRecent">\r
-        <div class="recent-title">\u041D\u0435\u0434\u0430\u0432\u043D\u0438\u0435</div>\r
-        <div class="chips" id="namesRecentChips"></div>\r
-      </div>\r
-\r
-      <div class="tree" id="namesTree" aria-label="\u0422\u0438\u043F\u044B \u0441\u043B\u043E\u0451\u0432">\r
-        <div class="list-header">\r
-          <span>\u0422\u0438\u043F\u044B \u0441\u043B\u043E\u0451\u0432</span>\r
-          <span class="tree-header-right">\r
-            <button\r
-              type="button"\r
-              class="linkish"\r
-              id="namesEditToggle"\r
-              aria-pressed="false"\r
-            >\r
-              \u0418\u0437\u043C\u0435\u043D\u0438\u0442\u044C\r
-            </button>\r
-          </span>\r
-        </div>\r
-        <div class="tree-editbar" id="namesEditBar">\r
-          <button type="button" class="linkish" id="namesAddRoot">+ \u0422\u0438\u043F</button>\r
-          <button type="button" class="linkish" id="namesReset">\u0421\u0431\u0440\u043E\u0441\u0438\u0442\u044C</button>\r
-          <span class="confirm-text" id="namesEditHint">\u043A\u043B\u0438\u043A \u043F\u043E \u0441\u0442\u0440\u043E\u043A\u0435 \u2014 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u0442\u044C</span>\r
-        </div>\r
-        <div class="tree-body" id="namesTreeBody" role="tree"></div>\r
-      </div>\r
-\r
-      <div class="names-start">\r
-        <label class="names-start-label" for="namesStart">\u041D\u0430\u0447\u0430\u0442\u044C \u0441</label>\r
-        <input\r
-          type="number"\r
-          class="names-start-input"\r
-          id="namesStart"\r
-          value="1"\r
-          min="1"\r
-          max="9999"\r
-          step="1"\r
-          inputmode="numeric"\r
-          aria-label="\u041D\u043E\u043C\u0435\u0440, \u0441 \u043A\u043E\u0442\u043E\u0440\u043E\u0433\u043E \u043D\u0430\u0447\u0438\u043D\u0430\u0435\u0442\u0441\u044F \u0441\u0447\u0451\u0442\u0447\u0438\u043A"\r
-        />\r
-      </div>\r
-\r
-      <div class="preview" id="namesPreview" aria-live="polite"></div>\r
-      <div class="status-row">\r
-        <div class="status" id="namesStatus" role="status"></div>\r
-        <button type="button" id="namesUndo">\u041E\u0442\u043C\u0435\u043D\u0438\u0442\u044C</button>\r
-      </div>\r
-\r
-      <details>\r
-        <summary>\u041A\u0430\u043A \u044D\u0442\u043E \u0440\u0430\u0431\u043E\u0442\u0430\u0435\u0442</summary>\r
-        <ul>\r
-          <li>\r
-            \u041F\u043E\u0440\u044F\u0434\u043E\u043A \u2014 <b>\u0441\u0432\u0435\u0440\u0445\u0443 \u0432\u043D\u0438\u0437</b> \u043F\u043E \u043F\u0430\u043D\u0435\u043B\u0438 Layers, \u0430 \u043D\u0435 \u043F\u043E \u043F\u043E\u0440\u044F\u0434\u043A\u0443\r
-            \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u044F. \u0421\u0447\u0438\u0442\u0430\u0435\u0442\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u0442\u0435\u043A\u0443\u0449\u0435\u0435 \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u0435.\r
-          </li>\r
-          <li>\r
-            \u0422\u0438\u043F-<b>\u0433\u0440\u0443\u043F\u043F\u0430</b> (<code>Eyes_</code>) \u0434\u0430\u0451\u0442\r
-            <code>Eyes_01</code>, <code>Eyes_02</code>\u2026\r
-          </li>\r
-          <li>\r
-            \u0422\u0438\u043F-<b>\u043B\u0438\u0441\u0442</b> (<code>Eyes_01_R_TopLash</code>) \u2014 \u044D\u0442\u043E \u0448\u0430\u0431\u043B\u043E\u043D:\r
-            \u0440\u0430\u0441\u0442\u0451\u0442 \u0441\u0435\u0433\u043C\u0435\u043D\u0442 <code>01</code> \u2192\r
-            <code>Eyes_02_R_TopLash</code>. \u041E\u0434\u0438\u043D \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u043D\u044B\u0439 \u0441\u043B\u043E\u0439 \u043F\u043E\u043B\u0443\u0447\u0438\u0442\r
-            \u0438\u043C\u044F \u0440\u043E\u0432\u043D\u043E \u043A\u0430\u043A \u0432 \u0441\u043F\u0438\u0441\u043A\u0435.\r
-          </li>\r
-          <li>\r
-            <b>\u041D\u0430\u0447\u0430\u0442\u044C \u0441</b> \u0437\u0430\u0434\u0430\u0451\u0442 \u043F\u0435\u0440\u0432\u044B\u0439 \u043D\u043E\u043C\u0435\u0440 \u0441\u0447\u0451\u0442\u0447\u0438\u043A\u0430 \u2014 \u043F\u0440\u0438\r
-            <code>5</code> \u0432\u044B\u0439\u0434\u0435\u0442 <code>Eyes_05</code>, <code>Eyes_06</code>\u2026\r
-            \u041F\u043E \u0443\u043C\u043E\u043B\u0447\u0430\u043D\u0438\u044E 1, \u043F\u0440\u0438 \u043A\u0430\u0436\u0434\u043E\u043C \u043E\u0442\u043A\u0440\u044B\u0442\u0438\u0438 \u043F\u043B\u0430\u0433\u0438\u043D\u0430 \u0441\u0431\u0440\u0430\u0441\u044B\u0432\u0430\u0435\u0442\u0441\u044F \u043E\u0431\u0440\u0430\u0442\u043D\u043E.\r
-          </li>\r
-          <li>\r
-            \u041D\u0430\u0432\u0435\u0434\u0438\u0442\u0435 \u043D\u0430 \u0441\u0442\u0440\u043E\u043A\u0443 \u2014 \u0432 \u043F\u043E\u043B\u043E\u0441\u0435 \u043F\u043E\u0434 \u0441\u043F\u0438\u0441\u043A\u043E\u043C \u0432\u0438\u0434\u043D\u043E, \u043A\u0430\u043A\u0438\u0435 \u0438\u043C\u0435\u043D\u0430\r
-            \u043F\u043E\u043B\u0443\u0447\u0430\u0442\u0441\u044F. \u0421\u0442\u0440\u0435\u043B\u043A\u0430 \u0441\u043B\u0435\u0432\u0430 \u0440\u0430\u0441\u043A\u0440\u044B\u0432\u0430\u0435\u0442 \u0432\u043B\u043E\u0436\u0435\u043D\u043D\u044B\u0435 \u0442\u0438\u043F\u044B.\r
-          </li>\r
-        </ul>\r
-      </details>\r
-    </div>\r
-\r
-    <p id="pluginVersionFooter" class="plugin-version-footer" aria-live="polite">\r
-      \u0412\u0435\u0440\u0441\u0438\u044F: \u2026\r
-    </p>\r
-\r
-    <script>\r
-      const tabRaster = document.getElementById("tabRaster");\r
-      const tabMo4 = document.getElementById("tabMo4");\r
-      const tabNames = document.getElementById("tabNames");\r
-      const panelRaster = document.getElementById("panelRaster");\r
-      const panelMo4 = document.getElementById("panelMo4");\r
-      const panelNames = document.getElementById("panelNames");\r
-      const rasterStatusEl = document.getElementById("rasterStatus");\r
-      const mo4StatusEl = document.getElementById("mo4Status");\r
-      const namesStatusEl = document.getElementById("namesStatus");\r
-      const scaleEl = document.getElementById("scale");\r
-      const originalDispositionEl = document.getElementById("originalDisposition");\r
-      const goRasterEl = document.getElementById("goRaster");\r
-      const mo4CheckEl = document.getElementById("mo4Check");\r
-      const mo4FixEl = document.getElementById("mo4Fix");\r
-      const mo4ListTitleEl = document.getElementById("mo4ListTitle");\r
-      const mo4ListBodyEl = document.getElementById("mo4ListBody");\r
-      const mo4SelectAllEl = document.getElementById("mo4SelectAll");\r
-      const mo4DebugWrapEl = document.getElementById("mo4DebugWrap");\r
-      const mo4DebugTextEl = document.getElementById("mo4DebugText");\r
-      const mo4DebugCopyEl = document.getElementById("mo4DebugCopy");\r
-      let mo4ViolationIds = [];\r
-\r
-      function pluralLayers(n) {\r
-        const mod10 = n % 10;\r
-        const mod100 = n % 100;\r
-        if (mod100 >= 11 && mod100 <= 14) return n + " \u0441\u043B\u043E\u0451\u0432";\r
-        if (mod10 === 1) return n + " \u0441\u043B\u043E\u0439";\r
-        if (mod10 >= 2 && mod10 <= 4) return n + " \u0441\u043B\u043E\u044F";\r
-        return n + " \u0441\u043B\u043E\u0451\u0432";\r
-      }\r
-\r
-      const TABS = [\r
-        { name: "raster", tab: tabRaster, panel: panelRaster, status: rasterStatusEl },\r
-        { name: "mo4", tab: tabMo4, panel: panelMo4, status: mo4StatusEl },\r
-        { name: "names", tab: tabNames, panel: panelNames, status: namesStatusEl },\r
-      ];\r
-\r
-      function setTab(which) {\r
-        for (const entry of TABS) {\r
-          const active = entry.name === which;\r
-          entry.tab.setAttribute("aria-selected", active ? "true" : "false");\r
-          entry.panel.classList.toggle("is-active", active);\r
-          if (!active) {\r
-            entry.status.textContent = "";\r
-          }\r
-        }\r
-        if (which === "names") {\r
-          namesSearchEl.focus();\r
-        }\r
-      }\r
-\r
-      for (const entry of TABS) {\r
-        entry.tab.addEventListener("click", () => setTab(entry.name));\r
-      }\r
-\r
-      let originalDisposition = "keep";\r
-      const dispositionRadios = originalDispositionEl.querySelectorAll('[role="radio"]');\r
-      dispositionRadios.forEach((button) => {\r
-        button.addEventListener("click", () => {\r
-          const value = button.getAttribute("data-value");\r
-          if (!value) {\r
-            return;\r
-          }\r
-          originalDisposition = value;\r
-          dispositionRadios.forEach((other) => {\r
-            const selected = other === button;\r
-            other.setAttribute("aria-checked", selected ? "true" : "false");\r
-            other.tabIndex = selected ? 0 : -1;\r
-          });\r
-        });\r
-      });\r
-\r
-      function postToPlugin(message) {\r
-        parent.postMessage({ pluginMessage: message }, "*");\r
-      }\r
-\r
-      const REMOTE_PACKAGE_JSON =\r
-        "https://raw.githubusercontent.com/MaxMaryev/Kids-Games-Figma-Plugin/main/package.json";\r
-\r
-      const updateBannerEl = document.getElementById("updateBanner");\r
-      const updateBannerBodyEl = document.getElementById("updateBannerBody");\r
-      const updateBannerDismissEl = document.getElementById("updateBannerDismiss");\r
-      const pluginVersionFooterEl = document.getElementById("pluginVersionFooter");\r
-\r
-      function setPluginVersionFooterLabel(version) {\r
-        const value = typeof version === "string" && version.length > 0 ? version : "\u2014";\r
-        pluginVersionFooterEl.textContent = "\u0412\u0435\u0440\u0441\u0438\u044F: " + value;\r
-      }\r
-\r
-      let pluginCurrentVersion = "";\r
-      let dismissedRemoteVersion = null;\r
-      let pendingUpdateRemoteVersion = "";\r
-\r
-      function parseSemverCore(version) {\r
-        const match = /^(\\d+)\\.(\\d+)\\.(\\d+)/.exec(String(version).trim());\r
-        if (!match) {\r
-          return null;\r
-        }\r
-        return {\r
-          major: parseInt(match[1], 10),\r
-          minor: parseInt(match[2], 10),\r
-          patch: parseInt(match[3], 10),\r
-        };\r
-      }\r
-\r
-      function isRemoteVersionNewer(currentVersion, remoteVersion) {\r
-        const current = parseSemverCore(currentVersion);\r
-        const remote = parseSemverCore(remoteVersion);\r
-        if (!current || !remote) {\r
-          return false;\r
-        }\r
-        if (remote.major !== current.major) {\r
-          return remote.major > current.major;\r
-        }\r
-        if (remote.minor !== current.minor) {\r
-          return remote.minor > current.minor;\r
-        }\r
-        return remote.patch > current.patch;\r
-      }\r
-\r
-      function isSafeSemverDisplay(value) {\r
-        return /^\\d+\\.\\d+\\.\\d+([+a-zA-Z0-9.-]*)?$/.test(String(value).trim());\r
-      }\r
-\r
-      async function runUpdateCheck() {\r
-        if (!pluginCurrentVersion) {\r
-          return;\r
-        }\r
-        let remoteVersion = "";\r
-        try {\r
-          const response = await fetch(REMOTE_PACKAGE_JSON, { method: "GET" });\r
-          if (!response.ok) {\r
-            return;\r
-          }\r
-          const data = await response.json();\r
-          if (!data || typeof data.version !== "string") {\r
-            return;\r
-          }\r
-          remoteVersion = data.version.trim();\r
-        } catch {\r
-          return;\r
-        }\r
-        if (!remoteVersion || !isSafeSemverDisplay(remoteVersion)) {\r
-          return;\r
-        }\r
-        if (!isRemoteVersionNewer(pluginCurrentVersion, remoteVersion)) {\r
-          return;\r
-        }\r
-        if (dismissedRemoteVersion === remoteVersion) {\r
-          return;\r
-        }\r
-        pendingUpdateRemoteVersion = remoteVersion;\r
-        updateBannerBodyEl.innerHTML =\r
-          "\u0414\u043E\u0441\u0442\u0443\u043F\u043D\u0430 \u0432\u0435\u0440\u0441\u0438\u044F <strong>" +\r
-          remoteVersion +\r
-          "</strong>, \u0443 \u0432\u0430\u0441 " +\r
-          pluginCurrentVersion +\r
-          ".<br />1. \u0417\u0430\u043A\u0440\u043E\u0439\u0442\u0435 \u043F\u043B\u0430\u0433\u0438\u043D." +\r
-          "<br />2. \u0412 \u043F\u0430\u043F\u043A\u0435 \u043F\u043B\u0430\u0433\u0438\u043D\u0430 \u0437\u0430\u043F\u0443\u0441\u0442\u0438\u0442\u0435 <code>UPDATE.bat</code>." +\r
-          "<br />3. \u041E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 \u043F\u043B\u0430\u0433\u0438\u043D \u0437\u0430\u043D\u043E\u0432\u043E \u2014 \u0432\u043D\u0438\u0437\u0443 \u0434\u043E\u043B\u0436\u043D\u0430 \u0431\u044B\u0442\u044C " +\r
-          remoteVersion +\r
-          ".";\r
-        updateBannerEl.classList.add("is-visible");\r
-      }\r
-\r
-      updateBannerDismissEl.addEventListener("click", () => {\r
-        if (pendingUpdateRemoteVersion) {\r
-          postToPlugin({\r
-            type: "setUpdateBannerDismissed",\r
-            remoteVersion: pendingUpdateRemoteVersion,\r
-          });\r
-        }\r
-        updateBannerEl.classList.remove("is-visible");\r
-        updateBannerBodyEl.textContent = "";\r
-        pendingUpdateRemoteVersion = "";\r
-      });\r
-\r
-      function setMo4Busy(busy, label) {\r
-        mo4CheckEl.disabled = busy;\r
-        mo4FixEl.disabled = busy;\r
-        if (busy) {\r
-          mo4CheckEl.textContent = label || "\u041E\u0431\u0440\u0430\u0431\u043E\u0442\u043A\u0430\u2026";\r
-          mo4FixEl.textContent = label || "\u041E\u0431\u0440\u0430\u0431\u043E\u0442\u043A\u0430\u2026";\r
-        } else {\r
-          mo4CheckEl.textContent = "\u041F\u0440\u043E\u0432\u0435\u0440\u0438\u0442\u044C";\r
-          mo4FixEl.textContent = "\u041F\u043E\u043F\u0440\u0430\u0432\u0438\u0442\u044C";\r
-        }\r
-      }\r
-\r
-      function renderMo4List(violations) {\r
-        mo4ListBodyEl.innerHTML = "";\r
-        mo4ViolationIds = (violations || []).map((v) => v.nodeId);\r
-        mo4SelectAllEl.disabled = mo4ViolationIds.length === 0;\r
-        if (!violations || violations.length === 0) {\r
-          mo4ListTitleEl.textContent = "\u0421\u043B\u043E\u0438 \u0441 \u043D\u0430\u0440\u0443\u0448\u0435\u043D\u0438\u0435\u043C (0)";\r
-          const empty = document.createElement("div");\r
-          empty.className = "list-empty";\r
-          empty.textContent =\r
-            "\u041D\u0430\u0436\u043C\u0438\u0442\u0435 \xAB\u041F\u0440\u043E\u0432\u0435\u0440\u0438\u0442\u044C\xBB, \u0447\u0442\u043E\u0431\u044B \u043F\u043E\u0441\u043C\u043E\u0442\u0440\u0435\u0442\u044C \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u0435.";\r
-          mo4ListBodyEl.appendChild(empty);\r
-          return;\r
-        }\r
-        mo4ListTitleEl.textContent =\r
-          "\u0421\u043B\u043E\u0438 \u0441 \u043D\u0430\u0440\u0443\u0448\u0435\u043D\u0438\u0435\u043C (" + violations.length + ")";\r
-        for (const item of violations) {\r
-          const row = document.createElement("div");\r
-          row.className = "list-item";\r
-          const main = document.createElement("div");\r
-          main.className = "list-item-main";\r
-          const nameEl = document.createElement("div");\r
-          nameEl.className = "list-item-name";\r
-          nameEl.textContent = item.name;\r
-          nameEl.title = item.name;\r
-          const meta = document.createElement("div");\r
-          meta.className = "list-item-meta";\r
-          meta.textContent =\r
-            item.width +\r
-            "\xD7" +\r
-            item.height +\r
-            " \u2192 " +\r
-            item.targetWidth +\r
-            "\xD7" +\r
-            item.targetHeight;\r
-          main.appendChild(nameEl);\r
-          main.appendChild(meta);\r
-          const showBtn = document.createElement("button");\r
-          showBtn.type = "button";\r
-          showBtn.className = "linkish";\r
-          showBtn.textContent = "\u041F\u043E\u043A\u0430\u0437\u0430\u0442\u044C";\r
-          showBtn.addEventListener("click", (event) => {\r
-            event.stopPropagation();\r
-            postToPlugin({ type: "focusNode", nodeId: item.nodeId });\r
-          });\r
-          row.addEventListener("click", () => {\r
-            postToPlugin({ type: "focusNode", nodeId: item.nodeId });\r
-          });\r
-          row.appendChild(main);\r
-          row.appendChild(showBtn);\r
-          mo4ListBodyEl.appendChild(row);\r
-        }\r
-      }\r
-\r
-      renderMo4List([]);\r
-\r
-      /* ---- \u0412\u043A\u043B\u0430\u0434\u043A\u0430 \xAB\u0420\u0435\u043D\u0435\u0439\u043C\u0438\u043D\u0433\xBB ---- */\r
-\r
-      const namesSearchEl = document.getElementById("namesSearch");\r
-      const namesRecentEl = document.getElementById("namesRecent");\r
-      const namesRecentChipsEl = document.getElementById("namesRecentChips");\r
-      const namesTreeEl = document.getElementById("namesTree");\r
-      const namesTreeBodyEl = document.getElementById("namesTreeBody");\r
-      const namesStartEl = document.getElementById("namesStart");\r
-      const namesPreviewEl = document.getElementById("namesPreview");\r
-      const namesUndoEl = document.getElementById("namesUndo");\r
-      const namesEditToggleEl = document.getElementById("namesEditToggle");\r
-      const namesEditBarEl = document.getElementById("namesEditBar");\r
-      const namesAddRootEl = document.getElementById("namesAddRoot");\r
-      const namesResetEl = document.getElementById("namesReset");\r
-      const namesEditHintEl = document.getElementById("namesEditHint");\r
-\r
-      const RECENT_LIMIT = 5;\r
-      const PREVIEW_EDIT =\r
-        "\u041F\u0440\u0430\u0432\u043A\u0430 \u0441\u043F\u0438\u0441\u043A\u0430: \u043A\u043B\u0438\u043A \u043F\u043E \u0441\u0442\u0440\u043E\u043A\u0435 \u2014 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u0442\u044C, + \u2014 \u0432\u043B\u043E\u0436\u0435\u043D\u043D\u044B\u0439 \u0442\u0438\u043F.";\r
-\r
-      /* \u0418\u043D\u043B\u0430\u0439\u043D\u043E\u0432\u044B\u0435 \u0438\u043A\u043E\u043D\u043A\u0438: \u0442\u0435\u043A\u0441\u0442\u043E\u0432\u044B\u0435 \u0433\u043B\u0438\u0444\u044B \xAB+ \u2191 \u2193 \xD7\xBB \u0432\u0441\u0442\u0430\u0432\u0430\u043B\u0438 \u043F\u043E-\u0440\u0430\u0437\u043D\u043E\u043C\u0443\r
-         \u043F\u043E \u0431\u0430\u0437\u043E\u0432\u043E\u0439 \u043B\u0438\u043D\u0438\u0438 \u0438 \u043F\u043B\u043E\u0442\u043D\u043E\u0441\u0442\u0438. */\r
-      const ICON_PATHS = {\r
-        chevron: "M4.5 2.5 L8 6 L4.5 9.5",\r
-        plus: "M6 2.5 V9.5 M2.5 6 H9.5",\r
-        up: "M6 9.5 V2.5 M3 5.5 L6 2.5 L9 5.5",\r
-        down: "M6 2.5 V9.5 M3 6.5 L6 9.5 L9 6.5",\r
-        close: "M3.2 3.2 L8.8 8.8 M8.8 3.2 L3.2 8.8",\r
-      };\r
-\r
-      function createIcon(name) {\r
-        const NS = "http://www.w3.org/2000/svg";\r
-        const svg = document.createElementNS(NS, "svg");\r
-        svg.setAttribute("viewBox", "0 0 12 12");\r
-        svg.setAttribute("width", "12");\r
-        svg.setAttribute("height", "12");\r
-        svg.setAttribute("fill", "none");\r
-        svg.setAttribute("aria-hidden", "true");\r
-        const path = document.createElementNS(NS, "path");\r
-        path.setAttribute("d", ICON_PATHS[name]);\r
-        path.setAttribute("stroke", "currentColor");\r
-        path.setAttribute("stroke-width", "1.5");\r
-        path.setAttribute("stroke-linecap", "round");\r
-        path.setAttribute("stroke-linejoin", "round");\r
-        svg.appendChild(path);\r
-        return svg;\r
-      }\r
-\r
-      let namePresets = [];\r
-      let recentTemplates = [];\r
-      let expandedIds = {};\r
-      let customIds = {};\r
-      let namesFilter = "";\r
-      let selectionCount = 0;\r
-      let hoveredTemplate = "";\r
-      let focusedRowIndex = 0;\r
-\r
-      // \u0420\u0435\u0436\u0438\u043C \u043F\u0440\u0430\u0432\u043A\u0438 \u0434\u0435\u0440\u0435\u0432\u0430. \u041E\u0431\u044B\u0447\u043D\u044B\u0439 \u043A\u043B\u0438\u043A \u043F\u043E \u0441\u0442\u0440\u043E\u043A\u0435 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u044B\u0432\u0430\u0435\u0442 \u0441\u043B\u043E\u0438,\r
-      // \u043F\u043E\u044D\u0442\u043E\u043C\u0443 \u0440\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u043D\u0438\u0435 \u0436\u0438\u0432\u0451\u0442 \u0432 \u043E\u0442\u0434\u0435\u043B\u044C\u043D\u043E\u043C \u0440\u0435\u0436\u0438\u043C\u0435 \u2014 \u043C\u0435\u043D\u044C\u0448\u0435 \u043F\u0440\u043E\u043C\u0430\u0445\u043E\u0432.\r
-      let isEditingPresets = false;\r
-      let editingNodeId = null;\r
-      let pendingAddParentId = undefined;\r
-      let confirmingDeleteId = null;\r
-      let confirmingReset = false;\r
-      let focusAfterRender = null;\r
-\r
-      // \u0417\u0435\u0440\u043A\u0430\u043B\u043E normalizeStartNumber \u0438\u0437 src/domain/layerNamePresets.ts.\r
-      function readStartNumber() {\r
-        const value = Number(namesStartEl.value);\r
-        if (!Number.isFinite(value)) {\r
-          return 1;\r
-        }\r
-        const whole = Math.trunc(value);\r
-        if (whole < 1) {\r
-          return 1;\r
-        }\r
-        return whole > 9999 ? 9999 : whole;\r
-      }\r
-\r
-      // \u0417\u0435\u0440\u043A\u0430\u043B\u043E buildNameForIndex \u0438\u0437 src/domain/layerNamePresets.ts \u2014\r
-      // \u043F\u0440\u0430\u0432\u043A\u0438 \u043D\u0443\u0436\u043D\u043E \u0432\u043D\u043E\u0441\u0438\u0442\u044C \u0432 \u043E\u0431\u043E\u0438\u0445 \u043C\u0435\u0441\u0442\u0430\u0445.\r
-      function previewName(template, index, startNumber) {\r
-        const value = index + startNumber;\r
-        const counter = value < 10 ? "0" + value : String(value);\r
-        if (template.slice(-1) === "_") {\r
-          return template + counter;\r
-        }\r
-        const segments = template.split("_");\r
-        const counterAt = segments.indexOf("01");\r
-        if (counterAt === -1) {\r
-          return template + "_" + counter;\r
-        }\r
-        segments[counterAt] = counter;\r
-        return segments.join("_");\r
-      }\r
-\r
-      function namesForCount(template, count) {\r
-        const start = readStartNumber();\r
-        if (count === 1) {\r
-          return previewName(template, 0, start);\r
-        }\r
-        if (count === 2) {\r
-          return (\r
-            previewName(template, 0, start) +\r
-            ", " +\r
-            previewName(template, 1, start)\r
-          );\r
-        }\r
-        return (\r
-          previewName(template, 0, start) +\r
-          ", " +\r
-          previewName(template, 1, start) +\r
-          " \u2026 " +\r
-          previewName(template, count - 1, start)\r
-        );\r
-      }\r
-\r
-      /**\r
-       * \u041F\u043E\u043B\u043E\u0441\u0430 \u043F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440\u0430 \u2014 \u0435\u0434\u0438\u043D\u0441\u0442\u0432\u0435\u043D\u043D\u043E\u0435 \u043C\u0435\u0441\u0442\u043E, \u0433\u0434\u0435 \u0432\u0438\u0434\u043D\u043E \u0438 \u0441\u043A\u043E\u043B\u044C\u043A\u043E \u0441\u043B\u043E\u0451\u0432\r
-       * \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u043E, \u0438 \u0447\u0442\u043E \u0441 \u043D\u0438\u043C\u0438 \u0441\u0442\u0430\u043D\u0435\u0442. \u0420\u0430\u043D\u044C\u0448\u0435 \u0441\u0447\u0451\u0442\u0447\u0438\u043A \u0436\u0438\u043B \u0432 \u0448\u0430\u043F\u043A\u0435 \u0434\u0435\u0440\u0435\u0432\u0430,\r
-       * \u0432 235px \u043E\u0442 \u0431\u0443\u0434\u0443\u0449\u0438\u0445 \u0438\u043C\u0451\u043D.\r
-       */\r
-      function setPreview(template) {\r
-        hoveredTemplate = template || "";\r
-        if (isEditingPresets) {\r
-          namesPreviewEl.textContent = PREVIEW_EDIT;\r
-          namesPreviewEl.classList.remove("is-active");\r
-          return;\r
-        }\r
-        if (selectionCount === 0) {\r
-          namesPreviewEl.textContent = "\u0412\u044B\u0434\u0435\u043B\u0438\u0442\u0435 \u0441\u043B\u043E\u0438 \u043D\u0430 \u043A\u0430\u043D\u0432\u0430\u0441\u0435";\r
-          namesPreviewEl.classList.remove("is-active");\r
-          return;\r
-        }\r
-        if (!template) {\r
-          namesPreviewEl.textContent =\r
-            pluralLayers(selectionCount) + " \u2014 \u043D\u0430\u0432\u0435\u0434\u0438\u0442\u0435 \u043D\u0430 \u0442\u0438\u043F";\r
-          namesPreviewEl.classList.remove("is-active");\r
-          return;\r
-        }\r
-        namesPreviewEl.textContent =\r
-          selectionCount + " \u2192 " + namesForCount(template, selectionCount);\r
-        namesPreviewEl.classList.add("is-active");\r
-      }\r
-\r
-      /** \u0427\u0442\u043E \u043F\u0440\u043E\u0438\u0437\u043E\u0439\u0434\u0451\u0442 \u0441 \u0432\u043B\u043E\u0436\u0435\u043D\u043D\u044B\u043C\u0438 \u043F\u0440\u0438 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u043D\u0438\u0438 \u0432\u0435\u0442\u043A\u0438. */\r
-      function setCascadePreview(node, nextTemplate) {\r
-        const template = nextTemplate.trim();\r
-        const affected = [];\r
-        const walk = (nodes) => {\r
-          for (const child of nodes) {\r
-            if (child.template.indexOf(node.template) === 0) {\r
-              affected.push(child);\r
-            }\r
-            walk(child.children || []);\r
-          }\r
-        };\r
-        walk(node.children || []);\r
-\r
-        if (template.length === 0) {\r
-          namesPreviewEl.textContent = "\u041F\u0443\u0441\u0442\u043E\u0435 \u0438\u043C\u044F \u2014 Enter \u043D\u0435 \u0441\u043E\u0445\u0440\u0430\u043D\u0438\u0442";\r
-          namesPreviewEl.classList.remove("is-active");\r
-          return;\r
-        }\r
-        if (template === node.template) {\r
-          namesPreviewEl.textContent =\r
-            affected.length > 0\r
-              ? "\u0412\u043B\u043E\u0436\u0435\u043D\u043D\u044B\u0445 \u043E\u0431\u043D\u043E\u0432\u0438\u0442\u0441\u044F \u0432\u043C\u0435\u0441\u0442\u0435: " + affected.length\r
-              : "\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043D\u043E\u0432\u043E\u0435 \u0438\u043C\u044F   \xB7   Esc \u2014 \u043E\u0442\u043C\u0435\u043D\u0430";\r
-          namesPreviewEl.classList.remove("is-active");\r
-          return;\r
-        }\r
-        if (affected.length === 0) {\r
-          namesPreviewEl.textContent =\r
-            node.template + " \u2192 " + template + "   \xB7   Enter, Esc \u2014 \u043E\u0442\u043C\u0435\u043D\u0430";\r
-          namesPreviewEl.classList.add("is-active");\r
-          return;\r
-        }\r
-        const sample =\r
-          template + affected[0].template.slice(node.template.length);\r
-        namesPreviewEl.textContent =\r
-          affected[0].template +\r
-          " \u2192 " +\r
-          sample +\r
-          (affected.length > 1 ? ", \u0438 \u0435\u0449\u0451 " + (affected.length - 1) : "");\r
-        namesPreviewEl.classList.add("is-active");\r
-      }\r
-\r
-      function setSelectionCount(count) {\r
-        selectionCount = count;\r
-        if (!isEditingPresets) {\r
-          setPreview(hoveredTemplate);\r
-        }\r
-      }\r
-\r
-      function matchesFilter(node, query) {\r
-        if (node.template.toLowerCase().indexOf(query) !== -1) {\r
-          return true;\r
-        }\r
-        const children = node.children || [];\r
-        for (const child of children) {\r
-          if (matchesFilter(child, query)) {\r
-            return true;\r
-          }\r
-        }\r
-        return false;\r
-      }\r
-\r
-      function createRowShell(depth) {\r
-        const row = document.createElement("div");\r
-        row.className = "tree-row";\r
-        row.style.setProperty("--depth", String(depth));\r
-        return row;\r
-      }\r
-\r
-      function createSpacer() {\r
-        const spacer = document.createElement("button");\r
-        spacer.type = "button";\r
-        spacer.className = "tree-toggle is-leaf";\r
-        spacer.tabIndex = -1;\r
-        spacer.setAttribute("aria-hidden", "true");\r
-        return spacer;\r
-      }\r
-\r
-      function createIconButton(icon, label, onClick, danger) {\r
-        const button = document.createElement("button");\r
-        button.type = "button";\r
-        button.className = "icon-btn" + (danger ? " is-danger" : "");\r
-        button.appendChild(createIcon(icon));\r
-        button.title = label;\r
-        button.tabIndex = -1;\r
-        button.setAttribute("aria-label", label);\r
-        button.addEventListener("click", (event) => {\r
-          event.stopPropagation();\r
-          onClick();\r
-        });\r
-        return button;\r
-      }\r
-\r
-      /** \u0421\u0442\u0440\u043E\u043A\u0430-\u0438\u043D\u043F\u0443\u0442: \u0438\u043D\u043B\u0430\u0439\u043D-\u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u043D\u0438\u0435 \u0438 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u0438\u0435 \u043D\u043E\u0432\u043E\u0433\u043E \u0442\u0438\u043F\u0430. */\r
-      function createInputRow(depth, value, onCommit, onCancel, onInput) {\r
-        const row = createRowShell(depth);\r
-        row.appendChild(createSpacer());\r
-\r
-        const input = document.createElement("input");\r
-        input.type = "text";\r
-        input.className = "tree-input";\r
-        input.value = value;\r
-        input.spellcheck = false;\r
-        input.autocomplete = "off";\r
-\r
-        let settled = false;\r
-        const commit = () => {\r
-          if (settled) return;\r
-          settled = true;\r
-          onCommit(input.value);\r
-        };\r
-        const cancel = () => {\r
-          if (settled) return;\r
-          settled = true;\r
-          onCancel();\r
-        };\r
-\r
-        input.addEventListener("keydown", (event) => {\r
-          if (event.key === "Enter") {\r
-            event.preventDefault();\r
-            commit();\r
-          } else if (event.key === "Escape") {\r
-            event.preventDefault();\r
-            cancel();\r
-          }\r
-        });\r
-        input.addEventListener("blur", commit);\r
-        if (onInput) {\r
-          input.addEventListener("input", () => onInput(input.value));\r
-          onInput(input.value);\r
-        }\r
-\r
-        row.appendChild(input);\r
-        focusAfterRender = input;\r
-        return row;\r
-      }\r
-\r
-      function createDeleteConfirmRow(node, depth) {\r
-        const row = createRowShell(depth);\r
-        row.appendChild(createSpacer());\r
-\r
-        const wrap = document.createElement("div");\r
-        wrap.className = "tree-confirm";\r
-        const label = document.createElement("span");\r
-        const nested = countPresetNodes(node.children || []);\r
-        // \u0418\u043C\u044F \u043E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u043E: \u0438\u043D\u0430\u0447\u0435 \u043F\u043E\u0441\u043B\u0435 \u0441\u043A\u0440\u043E\u043B\u043B\u0430 \u043D\u0435\u043F\u043E\u043D\u044F\u0442\u043D\u043E, \u0447\u0442\u043E \u0443\u0434\u0430\u043B\u044F\u0435\u0448\u044C.\r
-        label.textContent = nested > 0\r
-          ? "\u0423\u0434\u0430\u043B\u0438\u0442\u044C " + node.template + " \u0438 " + nested + " \u0432\u043B\u043E\u0436\u0435\u043D\u043D\u044B\u0445?"\r
-          : "\u0423\u0434\u0430\u043B\u0438\u0442\u044C " + node.template + "?";\r
-        label.title = label.textContent;\r
-        wrap.appendChild(label);\r
-\r
-        const yes = document.createElement("button");\r
-        yes.type = "button";\r
-        yes.className = "is-danger";\r
-        yes.textContent = "\u0423\u0434\u0430\u043B\u0438\u0442\u044C";\r
-        yes.addEventListener("click", () => {\r
-          confirmingDeleteId = null;\r
-          postToPlugin({ type: "removePreset", id: node.id });\r
-        });\r
-\r
-        const no = document.createElement("button");\r
-        no.type = "button";\r
-        no.textContent = "\u041E\u0442\u043C\u0435\u043D\u0430";\r
-        no.addEventListener("click", () => {\r
-          confirmingDeleteId = null;\r
-          renderNamesTree();\r
-        });\r
-\r
-        wrap.appendChild(yes);\r
-        wrap.appendChild(no);\r
-        row.appendChild(wrap);\r
-        return row;\r
-      }\r
-\r
-      function createTreeRow(node, depth, expanded) {\r
-        const children = node.children || [];\r
-        const hasChildren = children.length > 0;\r
-        const row = createRowShell(depth);\r
-        row.setAttribute("role", "treeitem");\r
-        row.dataset.id = node.id;\r
-        if (hasChildren) {\r
-          row.setAttribute("aria-expanded", expanded ? "true" : "false");\r
-        }\r
-\r
-        const toggle = document.createElement("button");\r
-        toggle.type = "button";\r
-        toggle.className = hasChildren ? "tree-toggle" : "tree-toggle is-leaf";\r
-        toggle.tabIndex = -1;\r
-        toggle.appendChild(createIcon("chevron"));\r
-        if (hasChildren) {\r
-          toggle.setAttribute("aria-expanded", expanded ? "true" : "false");\r
-          toggle.setAttribute(\r
-            "aria-label",\r
-            (expanded ? "\u0421\u0432\u0435\u0440\u043D\u0443\u0442\u044C " : "\u0420\u0430\u0441\u043A\u0440\u044B\u0442\u044C ") + node.template\r
-          );\r
-          toggle.addEventListener("click", () => {\r
-            expandedIds[node.id] = !expanded;\r
-            renderNamesTree();\r
-          });\r
-        } else {\r
-          toggle.setAttribute("aria-hidden", "true");\r
-        }\r
-\r
-        const isGroup = node.template.slice(-1) === "_";\r
-        const apply = document.createElement("button");\r
-        apply.type = "button";\r
-        apply.className =\r
-          "tree-apply " +\r
-          (isGroup ? "is-group" : "is-leaf") +\r
-          (isEditingPresets && customIds[node.id] ? " is-custom" : "");\r
-        apply.textContent = node.template;\r
-        apply.tabIndex = -1;\r
-        if (isEditingPresets) {\r
-          apply.title = "\u041F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u0442\u044C \u0442\u0438\u043F";\r
-          apply.addEventListener("click", () => startRenamePreset(node.id));\r
-        } else {\r
-          apply.title =\r
-            "\u041F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u0442\u044C \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u0435 \u2192 " + previewName(node.template, 0);\r
-          apply.addEventListener("click", () => applyNamePreset(node.template));\r
-          apply.addEventListener("mouseenter", () => setPreview(node.template));\r
-          apply.addEventListener("focus", () => setPreview(node.template));\r
-          apply.addEventListener("mouseleave", () => setPreview(""));\r
-          apply.addEventListener("blur", () => setPreview(""));\r
-        }\r
-\r
-        row.appendChild(toggle);\r
-        row.appendChild(apply);\r
-\r
-        const actions = document.createElement("div");\r
-        actions.className = "tree-actions";\r
-        actions.appendChild(\r
-          createIconButton("plus", "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u0432\u043B\u043E\u0436\u0435\u043D\u043D\u044B\u0439 \u0442\u0438\u043F", () =>\r
-            startAddPreset(node.id)\r
-          )\r
-        );\r
-        actions.appendChild(\r
-          createIconButton("up", "\u041F\u0435\u0440\u0435\u043C\u0435\u0441\u0442\u0438\u0442\u044C \u0432\u0432\u0435\u0440\u0445", () =>\r
-            postToPlugin({ type: "movePreset", id: node.id, direction: "up" })\r
-          )\r
-        );\r
-        actions.appendChild(\r
-          createIconButton("down", "\u041F\u0435\u0440\u0435\u043C\u0435\u0441\u0442\u0438\u0442\u044C \u0432\u043D\u0438\u0437", () =>\r
-            postToPlugin({ type: "movePreset", id: node.id, direction: "down" })\r
-          )\r
-        );\r
-        actions.appendChild(\r
-          createIconButton(\r
-            "close",\r
-            "\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u0442\u0438\u043F",\r
-            () => {\r
-              confirmingDeleteId = node.id;\r
-              renderNamesTree();\r
-            },\r
-            true\r
-          )\r
-        );\r
-        row.appendChild(actions);\r
-        return row;\r
-      }\r
-\r
-      function countPresetNodes(nodes) {\r
-        let total = 0;\r
-        for (const node of nodes) {\r
-          total++;\r
-          total += countPresetNodes(node.children || []);\r
-        }\r
-        return total;\r
-      }\r
-\r
-      function renderNamesTree() {\r
-        const query = namesFilter.trim().toLowerCase();\r
-        namesTreeBodyEl.innerHTML = "";\r
-        focusAfterRender = null;\r
-        let rendered = 0;\r
-\r
-        const walk = (nodes, depth) => {\r
-          for (const node of nodes) {\r
-            if (query && !matchesFilter(node, query)) {\r
-              continue;\r
-            }\r
-            const children = node.children || [];\r
-            const expanded = query ? true : Boolean(expandedIds[node.id]);\r
-\r
-            if (editingNodeId === node.id) {\r
-              namesTreeBodyEl.appendChild(\r
-                createInputRow(\r
-                  depth,\r
-                  node.template,\r
-                  (value) => commitRenamePreset(node.id, value),\r
-                  () => {\r
-                    editingNodeId = null;\r
-                    renderNamesTree();\r
-                    setPreview("");\r
-                  },\r
-                  (value) => setCascadePreview(node, value)\r
-                )\r
-              );\r
-            } else if (confirmingDeleteId === node.id) {\r
-              namesTreeBodyEl.appendChild(createDeleteConfirmRow(node, depth));\r
-            } else {\r
-              namesTreeBodyEl.appendChild(createTreeRow(node, depth, expanded));\r
-            }\r
-            rendered++;\r
-\r
-            if (pendingAddParentId === node.id) {\r
-              namesTreeBodyEl.appendChild(\r
-                createInputRow(\r
-                  depth + 1,\r
-                  "",\r
-                  (value) => commitAddPreset(node.id, value),\r
-                  cancelAddPreset,\r
-                  setAddPreview\r
-                )\r
-              );\r
-            }\r
-            if (children.length > 0 && expanded) {\r
-              walk(children, depth + 1);\r
-            }\r
-          }\r
-        };\r
-        walk(namePresets, 0);\r
-\r
-        if (pendingAddParentId === null) {\r
-          namesTreeBodyEl.appendChild(\r
-            createInputRow(\r
-              0,\r
-              "",\r
-              (value) => commitAddPreset(null, value),\r
-              cancelAddPreset,\r
-              setAddPreview\r
-            )\r
-          );\r
-          rendered++;\r
-        }\r
-\r
-        if (rendered === 0) {\r
-          const empty = document.createElement("div");\r
-          empty.className = "tree-empty";\r
-          empty.textContent = namePresets.length === 0\r
-            ? "\u0417\u0430\u0433\u0440\u0443\u0436\u0430\u044E \u0442\u0438\u043F\u044B\u2026"\r
-            : "\u041D\u0438\u0447\u0435\u0433\u043E \u043D\u0435 \u043D\u0430\u0448\u043B\u043E\u0441\u044C.";\r
-          namesTreeBodyEl.appendChild(empty);\r
-        }\r
-\r
-        applyRovingTabindex();\r
-\r
-        if (focusAfterRender) {\r
-          const input = focusAfterRender;\r
-          focusAfterRender = null;\r
-          input.focus();\r
-          input.select();\r
-        }\r
-      }\r
-\r
-      function setAddPreview(value) {\r
-        const template = value.trim();\r
-        namesPreviewEl.textContent = template\r
-          ? "\u041D\u043E\u0432\u044B\u0439 \u0442\u0438\u043F " + template + "   \xB7   Enter, Esc \u2014 \u043E\u0442\u043C\u0435\u043D\u0430"\r
-          : "\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u0438\u043C\u044F \u0442\u0438\u043F\u0430   \xB7   Esc \u2014 \u043E\u0442\u043C\u0435\u043D\u0430";\r
-        namesPreviewEl.classList.toggle("is-active", template.length > 0);\r
-      }\r
-\r
-      /* \u041A\u043B\u0430\u0432\u0438\u0430\u0442\u0443\u0440\u0430: \u0442\u0430\u0431\u0431\u0435\u043B\u044C\u043D\u0430 \u0442\u043E\u043B\u044C\u043A\u043E \u043E\u0434\u043D\u0430 \u0441\u0442\u0440\u043E\u043A\u0430 \u0434\u0435\u0440\u0435\u0432\u0430, \u0432\u043D\u0443\u0442\u0440\u0438 \u0445\u043E\u0434\u0438\u043C\r
-         \u0441\u0442\u0440\u0435\u043B\u043A\u0430\u043C\u0438. \u0418\u043D\u0430\u0447\u0435 \u043D\u0430 71 \u0441\u0442\u0440\u043E\u043A\u0435 \u043F\u043E\u043B\u0443\u0447\u0430\u0435\u0442\u0441\u044F \u0431\u043E\u043B\u044C\u0448\u0435 \u0441\u043E\u0442\u043D\u0438 \u0442\u0430\u0431\u0441\u0442\u043E\u043F\u043E\u0432. */\r
-      function treeRows() {\r
-        return [...namesTreeBodyEl.querySelectorAll('[role="treeitem"]')];\r
-      }\r
-\r
-      function applyRovingTabindex() {\r
-        const rows = treeRows();\r
-        if (rows.length === 0) return;\r
-        if (focusedRowIndex >= rows.length) focusedRowIndex = rows.length - 1;\r
-        if (focusedRowIndex < 0) focusedRowIndex = 0;\r
-        rows.forEach((row, index) => {\r
-          row.tabIndex = index === focusedRowIndex ? 0 : -1;\r
-        });\r
-      }\r
-\r
-      function focusRow(index, rows) {\r
-        const all = rows || treeRows();\r
-        if (all.length === 0) return;\r
-        focusedRowIndex = Math.max(0, Math.min(index, all.length - 1));\r
-        applyRovingTabindex();\r
-        all[focusedRowIndex].focus();\r
-      }\r
-\r
-      function nodeForRow(row) {\r
-        return row ? findPresetNode(namePresets, row.dataset.id) : null;\r
-      }\r
-\r
-      namesTreeBodyEl.addEventListener("focusin", (event) => {\r
-        const row = event.target.closest('[role="treeitem"]');\r
-        if (!row) return;\r
-        const rows = treeRows();\r
-        const index = rows.indexOf(row);\r
-        if (index !== -1) {\r
-          focusedRowIndex = index;\r
-          applyRovingTabindex();\r
-        }\r
-        const node = nodeForRow(row);\r
-        if (node && !isEditingPresets) {\r
-          setPreview(node.template);\r
-        }\r
-      });\r
-\r
-      namesTreeBodyEl.addEventListener("keydown", (event) => {\r
-        const row = event.target.closest('[role="treeitem"]');\r
-        if (!row) return;\r
-        const rows = treeRows();\r
-        const index = rows.indexOf(row);\r
-        const node = nodeForRow(row);\r
-        if (!node) return;\r
-        const hasChildren = (node.children || []).length > 0;\r
-        const expanded = Boolean(expandedIds[node.id]);\r
-\r
-        if (event.key === "ArrowDown") {\r
-          event.preventDefault();\r
-          focusRow(index + 1, rows);\r
-        } else if (event.key === "ArrowUp") {\r
-          event.preventDefault();\r
-          focusRow(index - 1, rows);\r
-        } else if (event.key === "ArrowRight") {\r
-          event.preventDefault();\r
-          if (hasChildren && !expanded) {\r
-            expandedIds[node.id] = true;\r
-            renderNamesTree();\r
-            focusRow(index, treeRows());\r
-          } else {\r
-            focusRow(index + 1, rows);\r
-          }\r
-        } else if (event.key === "ArrowLeft") {\r
-          event.preventDefault();\r
-          if (hasChildren && expanded) {\r
-            expandedIds[node.id] = false;\r
-            renderNamesTree();\r
-            focusRow(index, treeRows());\r
-          } else {\r
-            focusRow(index - 1, rows);\r
-          }\r
-        } else if (event.key === "Enter" || event.key === " ") {\r
-          event.preventDefault();\r
-          if (isEditingPresets) {\r
-            startRenamePreset(node.id);\r
-          } else {\r
-            applyNamePreset(node.template);\r
-          }\r
-        } else if (event.key === "Delete" && isEditingPresets) {\r
-          event.preventDefault();\r
-          confirmingDeleteId = node.id;\r
-          renderNamesTree();\r
-        }\r
-      });\r
-\r
-      /* \u041F\u0440\u0430\u0432\u043A\u0430 \u0434\u0435\u0440\u0435\u0432\u0430: \u043D\u0430\u043C\u0435\u0440\u0435\u043D\u0438\u0435 \u0443\u0445\u043E\u0434\u0438\u0442 \u0432 main, \u043E\u0442\u0442\u0443\u0434\u0430 \u043F\u0440\u0438\u0445\u043E\u0434\u0438\u0442 \u043D\u043E\u0432\u043E\u0435 \u0434\u0435\u0440\u0435\u0432\u043E. */\r
-\r
-      function setEditingPresets(editing) {\r
-        isEditingPresets = editing;\r
-        editingNodeId = null;\r
-        pendingAddParentId = undefined;\r
-        confirmingDeleteId = null;\r
-        confirmingReset = false;\r
-        namesTreeEl.classList.toggle("is-editing", editing);\r
-        namesEditToggleEl.textContent = editing ? "\u0413\u043E\u0442\u043E\u0432\u043E" : "\u0418\u0437\u043C\u0435\u043D\u0438\u0442\u044C";\r
-        namesEditToggleEl.setAttribute("aria-pressed", editing ? "true" : "false");\r
-        renderResetControl();\r
-        renderRecent();\r
-        setSelectionCount(selectionCount);\r
-        setPreview("");\r
-        renderNamesTree();\r
-      }\r
-\r
-      function startRenamePreset(id) {\r
-        editingNodeId = id;\r
-        pendingAddParentId = undefined;\r
-        confirmingDeleteId = null;\r
-        renderNamesTree();\r
-      }\r
-\r
-      function findPresetNode(nodes, id) {\r
-        for (const node of nodes) {\r
-          if (node.id === id) {\r
-            return node;\r
-          }\r
-          const found = findPresetNode(node.children || [], id);\r
-          if (found) {\r
-            return found;\r
-          }\r
-        }\r
-        return null;\r
-      }\r
-\r
-      function commitRenamePreset(id, value) {\r
-        const template = value.trim();\r
-        const current = findPresetNode(namePresets, id);\r
-        editingNodeId = null;\r
-        if (template.length === 0) {\r
-          namesStatusEl.textContent = "\u041F\u0443\u0441\u0442\u043E\u0435 \u0438\u043C\u044F \u2014 \u043E\u0441\u0442\u0430\u0432\u0438\u043B \u043A\u0430\u043A \u0431\u044B\u043B\u043E.";\r
-          renderNamesTree();\r
-          return;\r
-        }\r
-        // \u0418\u043D\u043F\u0443\u0442 \u0437\u0430\u043A\u0440\u044B\u0432\u0430\u0435\u0442\u0441\u044F \u0438 \u043F\u043E blur \u2014 \xAB\u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u043D\u0438\u0435\xBB \u0432 \u0442\u043E \u0436\u0435 \u0438\u043C\u044F \u043D\u0435 \u0448\u043B\u0451\u043C.\r
-        if (current && current.template === template) {\r
-          renderNamesTree();\r
-          return;\r
-        }\r
-        postToPlugin({ type: "renamePreset", id, template });\r
-      }\r
-\r
-      function startAddPreset(parentId) {\r
-        // \u041D\u043E\u0432\u044B\u0439 \u0442\u0438\u043F \u043C\u043E\u0436\u0435\u0442 \u043D\u0435 \u043F\u043E\u043F\u0430\u0441\u0442\u044C \u043F\u043E\u0434 \u0444\u0438\u043B\u044C\u0442\u0440 \u2014 \u043F\u043E\u043A\u0430\u0437\u044B\u0432\u0430\u0435\u043C \u0432\u0435\u0441\u044C \u0441\u043F\u0438\u0441\u043E\u043A.\r
-        namesFilter = "";\r
-        namesSearchEl.value = "";\r
-        pendingAddParentId = parentId;\r
-        editingNodeId = null;\r
-        confirmingDeleteId = null;\r
-        if (parentId) {\r
-          expandedIds[parentId] = true;\r
-        }\r
-        renderNamesTree();\r
-      }\r
-\r
-      function cancelAddPreset() {\r
-        pendingAddParentId = undefined;\r
-        renderNamesTree();\r
-      }\r
-\r
-      function commitAddPreset(parentId, value) {\r
-        const template = value.trim();\r
-        pendingAddParentId = undefined;\r
-        if (template.length === 0) {\r
-          renderNamesTree();\r
-          return;\r
-        }\r
-        postToPlugin({ type: "addPreset", parentId, template });\r
-      }\r
-\r
-      function renderResetControl() {\r
-        const customCount = Object.keys(customIds).length;\r
-        namesResetEl.textContent = confirmingReset\r
-          ? "\u0422\u043E\u0447\u043D\u043E \u0441\u0431\u0440\u043E\u0441\u0438\u0442\u044C?"\r
-          : customCount > 0\r
-            ? "\u0421\u0431\u0440\u043E\u0441\u0438\u0442\u044C (" + customCount + ")"\r
-            : "\u0421\u0431\u0440\u043E\u0441\u0438\u0442\u044C";\r
-        namesEditHintEl.textContent = confirmingReset\r
-          ? "\u0441\u0432\u043E\u0438 \u043F\u0440\u0430\u0432\u043A\u0438 \u0431\u0443\u0434\u0443\u0442 \u043F\u043E\u0442\u0435\u0440\u044F\u043D\u044B"\r
-          : "\u043A\u043B\u0438\u043A \u043F\u043E \u0441\u0442\u0440\u043E\u043A\u0435 \u2014 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u0442\u044C";\r
-      }\r
-\r
-      namesEditToggleEl.addEventListener("click", () => {\r
-        setEditingPresets(!isEditingPresets);\r
-      });\r
-\r
-      namesAddRootEl.addEventListener("click", () => {\r
-        confirmingReset = false;\r
-        renderResetControl();\r
-        startAddPreset(null);\r
-      });\r
-\r
-      namesUndoEl.addEventListener("click", () => {\r
-        postToPlugin({ type: "undoPresetEdit" });\r
-      });\r
-\r
-      namesResetEl.addEventListener("click", () => {\r
-        if (!confirmingReset) {\r
-          confirmingReset = true;\r
-          renderResetControl();\r
-          return;\r
-        }\r
-        confirmingReset = false;\r
-        renderResetControl();\r
-        postToPlugin({ type: "resetPresets" });\r
-      });\r
-\r
-      function renderRecent() {\r
-        namesRecentChipsEl.innerHTML = "";\r
-        // \u0412 \u0440\u0435\u0436\u0438\u043C\u0435 \u043F\u0440\u0430\u0432\u043A\u0438 \u0447\u0438\u043F\u0441\u044B \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u044B\u0432\u0430\u043B\u0438 \u0431\u044B \u0441\u043B\u043E\u0438 \u2014 \u043F\u0440\u044F\u0447\u0435\u043C \u0438\u0445.\r
-        namesRecentEl.classList.toggle(\r
-          "is-visible",\r
-          recentTemplates.length > 0 && !isEditingPresets\r
-        );\r
-        for (const template of recentTemplates) {\r
-          const chip = document.createElement("button");\r
-          chip.type = "button";\r
-          chip.className = "chip";\r
-          chip.textContent = template;\r
-          chip.title = "\u041F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u0442\u044C \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u0435 \u2192 " + previewName(template, 0);\r
-          chip.addEventListener("click", () => applyNamePreset(template));\r
-          chip.addEventListener("mouseenter", () => setPreview(template));\r
-          chip.addEventListener("focus", () => setPreview(template));\r
-          chip.addEventListener("mouseleave", () => setPreview(""));\r
-          chip.addEventListener("blur", () => setPreview(""));\r
-          namesRecentChipsEl.appendChild(chip);\r
-        }\r
-      }\r
-\r
-      function rememberTemplate(template) {\r
-        recentTemplates = [template].concat(\r
-          recentTemplates.filter((item) => item !== template)\r
-        );\r
-        if (recentTemplates.length > RECENT_LIMIT) {\r
-          recentTemplates = recentTemplates.slice(0, RECENT_LIMIT);\r
-        }\r
-        renderRecent();\r
-        postToPlugin({\r
-          type: "setRecentNamePresets",\r
-          templates: recentTemplates,\r
-        });\r
-      }\r
-\r
-      function applyNamePreset(template) {\r
-        if (isEditingPresets) {\r
-          return;\r
-        }\r
-        if (selectionCount === 0) {\r
-          namesStatusEl.textContent =\r
-            "\u0412\u044B\u0434\u0435\u043B\u0438\u0442\u0435 \u0441\u043B\u043E\u0438 \u043D\u0430 \u043A\u0430\u043D\u0432\u0430\u0441\u0435 \u2014 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u0443\u044E \u0438\u0445 \u0441\u0432\u0435\u0440\u0445\u0443 \u0432\u043D\u0438\u0437.";\r
-          return;\r
-        }\r
-        namesStatusEl.textContent = "\u041F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u043D\u0438\u0435\u2026";\r
-        rememberTemplate(template);\r
-        postToPlugin({\r
-          type: "renameLayers",\r
-          template,\r
-          startNumber: readStartNumber(),\r
-        });\r
-      }\r
-\r
-      namesSearchEl.addEventListener("input", () => {\r
-        namesFilter = namesSearchEl.value;\r
-        renderNamesTree();\r
-      });\r
-\r
-      // \u041F\u0435\u0440\u0435\u0441\u0447\u0438\u0442\u044B\u0432\u0430\u0435\u043C \u043F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440 \u043F\u0440\u044F\u043C\u043E \u0432\u043E \u0432\u0440\u0435\u043C\u044F \u0432\u0432\u043E\u0434\u0430: hoveredTemplate \u0445\u0440\u0430\u043D\u0438\u0442\u0441\u044F\r
-      // \u043A\u0430\u043A \u0440\u0430\u0437 \u0434\u043B\u044F \u0442\u0430\u043A\u043E\u0433\u043E \u043E\u0431\u043D\u043E\u0432\u043B\u0435\u043D\u0438\u044F.\r
-      namesStartEl.addEventListener("input", () => {\r
-        if (!isEditingPresets) {\r
-          setPreview(hoveredTemplate);\r
-        }\r
-      });\r
-\r
-      // \u041D\u0430 \u0432\u044B\u0445\u043E\u0434\u0435 \u0438\u0437 \u043F\u043E\u043B\u044F \u043F\u043E\u043A\u0430\u0437\u044B\u0432\u0430\u0435\u043C \u0442\u043E, \u0447\u0442\u043E \u0440\u0435\u0430\u043B\u044C\u043D\u043E \u0443\u0439\u0434\u0451\u0442 \u0432 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u043D\u0438\u0435:\r
-      // \xABabc\xBB, \xAB0\xBB, \xAB-3\xBB \u0438 \u043F\u0443\u0441\u0442\u043E\u0435 \u0441\u0445\u043B\u043E\u043F\u044B\u0432\u0430\u044E\u0442\u0441\u044F \u0432 1.\r
-      namesStartEl.addEventListener("change", () => {\r
-        namesStartEl.value = String(readStartNumber());\r
-      });\r
-      namesStartEl.addEventListener("blur", () => {\r
-        namesStartEl.value = String(readStartNumber());\r
-      });\r
-\r
-      renderResetControl();\r
-      setPreview("");\r
-      setSelectionCount(0);\r
-      renderNamesTree();\r
-      renderRecent();\r
-      postToPlugin({ type: "getRecentNamePresets" });\r
-\r
-      goRasterEl.addEventListener("click", () => {\r
-        rasterStatusEl.textContent = "\u041E\u0431\u0440\u0430\u0431\u043E\u0442\u043A\u0430\u2026";\r
-        goRasterEl.disabled = true;\r
-        postToPlugin({\r
-          type: "rasterize",\r
-          scale: parseFloat(scaleEl.value),\r
-          originalDisposition,\r
-        });\r
-      });\r
-\r
-      mo4CheckEl.addEventListener("click", () => {\r
-        mo4StatusEl.textContent = "";\r
-        setMo4Busy(true);\r
-        postToPlugin({ type: "multipleOfFourCheck" });\r
-      });\r
-\r
-      mo4SelectAllEl.addEventListener("click", () => {\r
-        if (mo4ViolationIds.length === 0) return;\r
-        postToPlugin({ type: "selectNodes", nodeIds: mo4ViolationIds });\r
-      });\r
-\r
-      mo4FixEl.addEventListener("click", () => {\r
-        mo4StatusEl.textContent = "";\r
-        setMo4Busy(true);\r
-        postToPlugin({ type: "multipleOfFourFix" });\r
-      });\r
-\r
-      function renderMo4Debug(lines) {\r
-        const text = Array.isArray(lines) ? lines.join("\\n") : "";\r
-        mo4DebugTextEl.value = text;\r
-        mo4DebugWrapEl.hidden = text === "";\r
-        mo4DebugWrapEl.open = text !== "";\r
-      }\r
-\r
-      mo4DebugCopyEl.addEventListener("click", () => {\r
-        if (!mo4DebugTextEl.value) return;\r
-        // \u0412 iframe \u043F\u043B\u0430\u0433\u0438\u043D\u0430 navigator.clipboard \u0447\u0430\u0441\u0442\u043E \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D, \u043F\u043E\u044D\u0442\u043E\u043C\u0443 \u043A\u043E\u043F\u0438\u0440\u0443\u0435\u043C\r
-        // \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u0435\u043C \u0441\u0430\u043C\u043E\u0433\u043E textarea \u2014 \u043E\u043D \u0438 \u0442\u0430\u043A \u043D\u0430 \u044D\u043A\u0440\u0430\u043D\u0435.\r
-        mo4DebugTextEl.focus();\r
-        mo4DebugTextEl.select();\r
-        let copied = false;\r
-        try {\r
-          copied = document.execCommand("copy");\r
-        } catch (error) {\r
-          copied = false;\r
-        }\r
-        mo4DebugCopyEl.textContent = copied\r
-          ? "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E"\r
-          : "\u041D\u0435 \u0432\u044B\u0448\u043B\u043E \u2014 \u0432\u044B\u0434\u0435\u043B\u0438\u0442\u0435 \u0438 Ctrl+C";\r
-        setTimeout(() => {\r
-          mo4DebugCopyEl.textContent = "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u0442\u044C";\r
-        }, 2000);\r
-      });\r
-\r
-      window.onmessage = (event) => {\r
-        const msg = event.data.pluginMessage;\r
-        if (!msg || !msg.type) {\r
-          return;\r
-        }\r
-        if (msg.type === "pluginVersion") {\r
-          const nextVersion =\r
-            typeof msg.version === "string" ? msg.version : "";\r
-          const previousVersion = pluginCurrentVersion;\r
-          pluginCurrentVersion = nextVersion;\r
-          setPluginVersionFooterLabel(nextVersion);\r
-          if (nextVersion.length > 0 && nextVersion !== previousVersion) {\r
-            postToPlugin({ type: "getUpdateBannerDismissed" });\r
-          }\r
-          return;\r
-        }\r
-        if (msg.type === "layerNamePresets") {\r
-          if (Array.isArray(msg.presets) && msg.presets.length > 0) {\r
-            namePresets = msg.presets;\r
-            customIds = {};\r
-            for (const id of msg.customIds || []) {\r
-              customIds[id] = true;\r
-            }\r
-            editingNodeId = null;\r
-            pendingAddParentId = undefined;\r
-            confirmingDeleteId = null;\r
-            renderNamesTree();\r
-            renderResetControl();\r
-            if (isEditingPresets) {\r
-              setPreview("");\r
-            }\r
-          }\r
-          namesUndoEl.classList.toggle("is-visible", Boolean(msg.canUndo));\r
-          if (msg.notice) {\r
-            namesStatusEl.textContent = msg.notice;\r
-          }\r
-          return;\r
-        }\r
-        if (msg.type === "selectionChanged") {\r
-          setSelectionCount(\r
-            typeof msg.count === "number" && msg.count > 0 ? msg.count : 0\r
-          );\r
-          return;\r
-        }\r
-        if (msg.type === "recentNamePresets") {\r
-          recentTemplates = Array.isArray(msg.templates)\r
-            ? msg.templates.slice(0, RECENT_LIMIT)\r
-            : [];\r
-          renderRecent();\r
-          return;\r
-        }\r
-        if (msg.type === "renameLayersResult") {\r
-          const names = Array.isArray(msg.names) ? msg.names : [];\r
-          if (!msg.ok && names.length === 0) {\r
-            namesStatusEl.textContent = msg.error || "\u0427\u0442\u043E-\u0442\u043E \u043F\u043E\u0448\u043B\u043E \u043D\u0435 \u0442\u0430\u043A.";\r
-            return;\r
-          }\r
-          let text = "\u0413\u043E\u0442\u043E\u0432\u043E \u2014 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u043D\u043E " + pluralLayers(msg.renamed) + ".";\r
-          if (names.length === 1) {\r
-            text += "\\n" + names[0];\r
-          } else if (names.length > 1) {\r
-            text += "\\n" + names[0] + " \u2026 " + names[names.length - 1];\r
-          }\r
-          if (msg.error) {\r
-            text += "\\n" + msg.error;\r
-          }\r
-          namesStatusEl.textContent = text;\r
-          return;\r
-        }\r
-        if (msg.type === "updateBannerDismissed") {\r
-          dismissedRemoteVersion =\r
-            msg.dismissedRemoteVersion === null ||\r
-            msg.dismissedRemoteVersion === undefined\r
-              ? null\r
-              : String(msg.dismissedRemoteVersion);\r
-          runUpdateCheck();\r
-          return;\r
-        }\r
-        if (msg.type === "done") {\r
-          goRasterEl.disabled = false;\r
-          if (msg.ok) {\r
-            rasterStatusEl.textContent =\r
-              "\u0413\u043E\u0442\u043E\u0432\u043E \u2014 \u043E\u0431\u0440\u0430\u0431\u043E\u0442\u0430\u043D\u043E " + pluralLayers(msg.done) + ".";\r
-            return;\r
-          }\r
-          let text = "";\r
-          if (msg.done > 0) {\r
-            text += "\u041E\u0431\u0440\u0430\u0431\u043E\u0442\u0430\u043D\u043E: " + pluralLayers(msg.done) + ".\\n";\r
-          }\r
-          if (msg.errors && msg.errors.length) {\r
-            text += msg.errors.join("\\n");\r
-          } else if (msg.error) {\r
-            text += msg.error;\r
-          } else {\r
-            text += "\u0427\u0442\u043E-\u0442\u043E \u043F\u043E\u0448\u043B\u043E \u043D\u0435 \u0442\u0430\u043A.";\r
-          }\r
-          rasterStatusEl.textContent = text;\r
-          return;\r
-        }\r
-        if (msg.type === "multipleOfFourCheckResult") {\r
-          setMo4Busy(false);\r
-          renderMo4List(msg.violations || []);\r
-          const parts = [];\r
-          if (msg.violations && msg.violations.length) {\r
-            parts.push(\r
-              "\u041D\u0430\u0448\u043B\u043E\u0441\u044C " +\r
-                pluralLayers(msg.violations.length) +\r
-                " \u0441 \u043D\u0430\u0440\u0443\u0448\u0435\u043D\u0438\u0435\u043C \u2014 \u043E\u0441\u0442\u0430\u0432\u0438\u043B \u0438\u0445 \u0432 \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u0438."\r
-            );\r
-          } else {\r
-            parts.push("\u0412\u0441\u0435 \u0441\u043B\u043E\u0438 \u043A\u0440\u0430\u0442\u043D\u044B 4 \u2014 \u043D\u0430\u0440\u0443\u0448\u0435\u043D\u0438\u0439 \u043D\u0435\u0442.");\r
-          }\r
-          if (msg.skipped && msg.skipped.length) {\r
-            parts.push("\u041F\u0440\u043E\u043F\u0443\u0449\u0435\u043D\u043E: " + msg.skipped.length + ".");\r
-          }\r
-          mo4StatusEl.textContent = parts.join(" ");\r
-          return;\r
-        }\r
-        if (msg.type === "multipleOfFourFixResult") {\r
-          setMo4Busy(false);\r
-          renderMo4Debug(msg.debug);\r
-          let text = "";\r
-          if (msg.fixedParents > 0) {\r
-            text +=\r
-              "\u041E\u0431\u0435\u0440\u043D\u0443\u0442\u043E: " + pluralLayers(msg.fixedParents) + ".";\r
-          }\r
-          if (msg.skipped > 0) {\r
-            text +=\r
-              (text ? " " : "") +\r
-              "\u041F\u0440\u043E\u043F\u0443\u0449\u0435\u043D\u043E: " +\r
-              msg.skipped +\r
-              " (\u043D\u0435\u0442 absoluteRenderBounds \u0438\u043B\u0438 \u043D\u0435\u043B\u044C\u0437\u044F \u043F\u043E\u0434\u043E\u0433\u043D\u0430\u0442\u044C \u0440\u043E\u0434\u0438\u0442\u0435\u043B\u044F).";\r
-          }\r
-          if (msg.errors && msg.errors.length) {\r
-            text += (text ? "\\n" : "") + msg.errors.join("\\n");\r
-          }\r
-          if (!text) {\r
-            text = msg.ok ? "\u0413\u043E\u0442\u043E\u0432\u043E." : "\u0427\u0442\u043E-\u0442\u043E \u043F\u043E\u0448\u043B\u043E \u043D\u0435 \u0442\u0430\u043A.";\r
-          }\r
-          mo4StatusEl.textContent = text;\r
-        }\r
-      };\r
-\r
-      function requestPluginVersionFromMain() {\r
-        postToPlugin({ type: "requestPluginVersion" });\r
-      }\r
-\r
-      requestPluginVersionFromMain();\r
-      if (document.readyState !== "complete") {\r
-        window.addEventListener("load", requestPluginVersionFromMain);\r
-      }\r
-      setTimeout(requestPluginVersionFromMain, 200);\r
-      setTimeout(requestPluginVersionFromMain, 800);\r
-    </script>\r
-  </body>\r
-</html>\r
-`, {
+figma.showUI('<!DOCTYPE html>\r\n<html lang="ru">\r\n  <head>\r\n    <meta charset="utf-8" />\r\n    <title>\u{1F60A} Kids Games Plugin \u{1F60A}</title>\r\n    <style>\r\n      :root {\r\n        --accent: #8b5cf6;\r\n        --accent-hover: #7c3aed;\r\n        --accent-soft: rgba(139, 92, 246, 0.12);\r\n        --radius-sm: 6px;\r\n        --radius-md: 10px;\r\n        --radius-lg: 14px;\r\n        --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);\r\n      }\r\n\r\n      * {\r\n        box-sizing: border-box;\r\n      }\r\n\r\n      body {\r\n        font: 12px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", system-ui,\r\n          sans-serif;\r\n        margin: 0;\r\n        padding: 14px;\r\n        color: var(--figma-color-text);\r\n        background: var(--figma-color-bg);\r\n      }\r\n\r\n      /* \u0421\u0435\u0433\u043C\u0435\u043D\u0442\u0438\u0440\u043E\u0432\u0430\u043D\u043D\u044B\u0435 \u0432\u043A\u043B\u0430\u0434\u043A\u0438 */\r\n      .tabs {\r\n        display: flex;\r\n        gap: 3px;\r\n        padding: 3px;\r\n        margin-bottom: 14px;\r\n        border-radius: var(--radius-md);\r\n        background: var(--figma-color-bg-secondary);\r\n      }\r\n      .tabs button {\r\n        flex: 1;\r\n        /* \u0411\u0435\u0437 min-width: 0 \u0444\u043B\u0435\u043A\u0441-\u043A\u043D\u043E\u043F\u043A\u0430 \u043D\u0435 \u0441\u0436\u0438\u043C\u0430\u0435\u0442\u0441\u044F \u043D\u0438\u0436\u0435 \u0441\u0432\u043E\u0435\u0433\u043E \u0442\u0435\u043A\u0441\u0442\u0430,\r\n           \u0438 \u0447\u0435\u0442\u0432\u0451\u0440\u0442\u0430\u044F \u0432\u043A\u043B\u0430\u0434\u043A\u0430 \u0432\u044B\u0434\u0430\u0432\u043B\u0438\u0432\u0430\u0435\u0442 \u0440\u044F\u0434 \u0437\u0430 \u043F\u0440\u0435\u0434\u0435\u043B\u044B \u043E\u043A\u043D\u0430 320 px. */\r\n        min-width: 0;\r\n        margin: 0;\r\n        padding: 7px 3px;\r\n        font-size: 11px;\r\n        white-space: nowrap;\r\n        overflow: hidden;\r\n        text-overflow: ellipsis;\r\n        border: none;\r\n        background: transparent;\r\n        color: var(--figma-color-text-secondary);\r\n        cursor: pointer;\r\n        font: inherit;\r\n        font-weight: 500;\r\n        border-radius: calc(var(--radius-md) - 3px);\r\n        transition: background 0.15s ease, color 0.15s ease;\r\n      }\r\n      .tabs button:hover {\r\n        color: var(--figma-color-text);\r\n      }\r\n      .tabs button[aria-selected="true"] {\r\n        background: var(--figma-color-bg);\r\n        color: var(--figma-color-text);\r\n        box-shadow: var(--shadow-sm);\r\n      }\r\n\r\n      /* \u0421\u0435\u0433\u043C\u0435\u043D\u0442 \xAB\u041E\u0440\u0438\u0433\u0438\u043D\u0430\u043B\xBB */\r\n      .segmented {\r\n        display: flex;\r\n        gap: 2px;\r\n        padding: 3px;\r\n        margin-top: 2px;\r\n        border-radius: var(--radius-md);\r\n        background: var(--figma-color-bg-secondary);\r\n      }\r\n      .segmented button {\r\n        flex: 1;\r\n        margin: 0;\r\n        padding: 7px 6px;\r\n        border: none;\r\n        background: transparent;\r\n        color: var(--figma-color-text-secondary);\r\n        cursor: pointer;\r\n        font: inherit;\r\n        font-size: 11px;\r\n        font-weight: 500;\r\n        border-radius: calc(var(--radius-md) - 3px);\r\n        transition: background 0.15s ease, color 0.15s ease;\r\n      }\r\n      .segmented button:hover {\r\n        color: var(--figma-color-text);\r\n      }\r\n      .segmented button[aria-checked="true"] {\r\n        background: var(--figma-color-bg);\r\n        color: var(--figma-color-text);\r\n        box-shadow: var(--shadow-sm);\r\n      }\r\n\r\n      .panel {\r\n        display: none;\r\n      }\r\n      .panel.is-active {\r\n        display: block;\r\n      }\r\n\r\n      /* \u041F\u043E\u0434\u0441\u043A\u0430\u0437\u043A\u0438 */\r\n      .hint {\r\n        font-size: 11px;\r\n        color: var(--figma-color-text-secondary);\r\n        margin: 0 0 4px;\r\n        line-height: 1.5;\r\n      }\r\n      .hint code {\r\n        font-size: 10.5px;\r\n        padding: 1px 5px;\r\n        border-radius: 4px;\r\n        background: var(--figma-color-bg-secondary);\r\n        font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;\r\n      }\r\n\r\n      /* \u041F\u043E\u043B\u044F */\r\n      .field {\r\n        display: block;\r\n        margin: 14px 0 6px;\r\n        font-weight: 500;\r\n      }\r\n\r\n      select {\r\n        width: 100%;\r\n        padding: 8px 10px;\r\n        border: 1px solid var(--figma-color-border);\r\n        border-radius: var(--radius-sm);\r\n        background: var(--figma-color-bg);\r\n        color: var(--figma-color-text);\r\n        font: inherit;\r\n        cursor: pointer;\r\n      }\r\n      select:focus {\r\n        outline: none;\r\n        border-color: var(--accent);\r\n        box-shadow: 0 0 0 3px var(--accent-soft);\r\n      }\r\n\r\n      /* \u041A\u043D\u043E\u043F\u043A\u0438 */\r\n      .actions-row {\r\n        display: flex;\r\n        gap: 8px;\r\n        margin-top: 12px;\r\n      }\r\n      .actions-row button {\r\n        flex: 1;\r\n      }\r\n\r\n      button.primary,\r\n      button.secondary {\r\n        margin: 0;\r\n        padding: 9px 12px;\r\n        border-radius: var(--radius-sm);\r\n        border: none;\r\n        cursor: pointer;\r\n        font: inherit;\r\n        font-weight: 500;\r\n        transition: background 0.15s ease, transform 0.05s ease;\r\n      }\r\n      button.primary {\r\n        background: var(--accent);\r\n        color: #fff;\r\n      }\r\n      button.primary:hover:not(:disabled) {\r\n        background: var(--accent-hover);\r\n      }\r\n      button.primary:active:not(:disabled) {\r\n        transform: translateY(0.5px);\r\n      }\r\n      button.secondary {\r\n        background: var(--figma-color-bg-secondary);\r\n        color: var(--figma-color-text);\r\n      }\r\n      button.secondary:hover:not(:disabled) {\r\n        background:\r\n          linear-gradient(var(--accent-soft), var(--accent-soft)),\r\n          var(--figma-color-bg-hover);\r\n      }\r\n      button.action-full {\r\n        width: 100%;\r\n        margin-top: 14px;\r\n      }\r\n      button:disabled {\r\n        opacity: 0.5;\r\n        cursor: not-allowed;\r\n      }\r\n\r\n      /* \u0421\u0442\u0430\u0442\u0443\u0441 */\r\n      .status {\r\n        margin-top: 12px;\r\n        padding: 8px 10px;\r\n        border-radius: var(--radius-sm);\r\n        background: var(--figma-color-bg-secondary);\r\n        color: var(--figma-color-text-secondary);\r\n        font-size: 11px;\r\n        white-space: pre-wrap;\r\n        max-height: 92px;\r\n        overflow-y: auto;\r\n      }\r\n      .status:empty {\r\n        display: none;\r\n      }\r\n\r\n      /* \u041F\u0440\u043E\u0433\u0440\u0435\u0441\u0441 \u044D\u043A\u0441\u043F\u043E\u0440\u0442\u0430 PSD */\r\n      .psd-progress {\r\n        margin-top: 12px;\r\n        height: 4px;\r\n        border-radius: 2px;\r\n        background: var(--figma-color-bg-secondary);\r\n        overflow: hidden;\r\n      }\r\n      .psd-progress[hidden] {\r\n        display: none;\r\n      }\r\n      .psd-progress-bar {\r\n        height: 100%;\r\n        width: 0%;\r\n        background: var(--accent);\r\n        transition: width 0.12s linear;\r\n      }\r\n\r\n      /* \u041B\u043E\u0433 \u0434\u0438\u0430\u0433\u043D\u043E\u0441\u0442\u0438\u043A\u0438 */\r\n      .debug-text {\r\n        width: 100%;\r\n        box-sizing: border-box;\r\n        margin-bottom: 8px;\r\n        padding: 8px 10px;\r\n        border: 1px solid var(--figma-color-border);\r\n        border-radius: var(--radius-sm);\r\n        background: var(--figma-color-bg-secondary);\r\n        color: var(--figma-color-text-secondary);\r\n        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\r\n        font-size: 10px;\r\n        line-height: 1.45;\r\n        white-space: pre;\r\n        resize: vertical;\r\n      }\r\n\r\n      /* \u0421\u043F\u0438\u0441\u043E\u043A \u043D\u0430\u0440\u0443\u0448\u0435\u043D\u0438\u0439 */\r\n      .list-wrap {\r\n        margin-top: 12px;\r\n        border-radius: var(--radius-sm);\r\n        background: var(--figma-color-bg-secondary);\r\n        overflow: hidden;\r\n      }\r\n      .list-header {\r\n        display: flex;\r\n        align-items: center;\r\n        justify-content: space-between;\r\n        gap: 8px;\r\n        padding: 6px 10px;\r\n        font-size: 10px;\r\n        font-weight: 600;\r\n        color: var(--figma-color-text-secondary);\r\n        text-transform: uppercase;\r\n        letter-spacing: 0.5px;\r\n      }\r\n      .list-header button.linkish {\r\n        margin: 0;\r\n        padding: 4px 8px;\r\n        border: none;\r\n        background: transparent;\r\n        color: var(--accent);\r\n        cursor: pointer;\r\n        font: inherit;\r\n        font-size: 11px;\r\n        font-weight: 500;\r\n        text-transform: none;\r\n        letter-spacing: 0;\r\n        border-radius: 4px;\r\n        transition: background 0.15s ease, opacity 0.15s ease;\r\n      }\r\n      .list-header button.linkish:hover:not(:disabled) {\r\n        background: var(--accent-soft);\r\n      }\r\n      .list-header button.linkish:disabled {\r\n        opacity: 0.4;\r\n        cursor: not-allowed;\r\n      }\r\n      .list-body {\r\n        max-height: 160px;\r\n        overflow-y: auto;\r\n        background: var(--figma-color-bg);\r\n      }\r\n      .list-empty {\r\n        padding: 16px 10px;\r\n        color: var(--figma-color-text-secondary);\r\n        font-size: 11px;\r\n        text-align: center;\r\n        line-height: 1.5;\r\n      }\r\n      .list-item {\r\n        display: flex;\r\n        align-items: center;\r\n        gap: 8px;\r\n        padding: 8px 10px;\r\n        border-bottom: 1px solid var(--figma-color-border);\r\n        cursor: pointer;\r\n        transition: background 0.15s ease;\r\n      }\r\n      .list-item:hover {\r\n        background: var(--figma-color-bg-hover);\r\n      }\r\n      .list-item:last-child {\r\n        border-bottom: none;\r\n      }\r\n      .list-item-main {\r\n        flex: 1;\r\n        min-width: 0;\r\n      }\r\n      .list-item-name {\r\n        font-weight: 500;\r\n        overflow: hidden;\r\n        text-overflow: ellipsis;\r\n        white-space: nowrap;\r\n      }\r\n      .list-item-meta {\r\n        font-size: 11px;\r\n        color: var(--figma-color-text-secondary);\r\n        margin-top: 2px;\r\n      }\r\n      .list-item button.linkish {\r\n        flex-shrink: 0;\r\n        margin: 0;\r\n        padding: 4px 8px;\r\n        border: none;\r\n        background: transparent;\r\n        color: var(--accent);\r\n        cursor: pointer;\r\n        font: inherit;\r\n        font-weight: 500;\r\n        border-radius: 4px;\r\n        transition: background 0.15s ease;\r\n      }\r\n      .list-item button.linkish:hover {\r\n        background: var(--accent-soft);\r\n      }\r\n\r\n      /* \u0412\u043A\u043B\u0430\u0434\u043A\u0430 \xAB\u0420\u0435\u043D\u0435\u0439\u043C\u0438\u043D\u0433\xBB: \u043F\u043E\u0438\u0441\u043A, \u043D\u0435\u0434\u0430\u0432\u043D\u0438\u0435, \u0434\u0435\u0440\u0435\u0432\u043E \u043F\u0440\u0435\u0441\u0435\u0442\u043E\u0432 */\r\n      .search-input.names-search-first {\r\n        margin-top: 0;\r\n      }\r\n      .search-input {\r\n        width: 100%;\r\n        margin-top: 10px;\r\n        padding: 7px 10px;\r\n        border: 1px solid var(--figma-color-border);\r\n        border-radius: var(--radius-sm);\r\n        background: var(--figma-color-bg);\r\n        color: var(--figma-color-text);\r\n        font: inherit;\r\n      }\r\n      .search-input::placeholder {\r\n        color: var(--figma-color-text-secondary);\r\n      }\r\n      .search-input:focus {\r\n        outline: none;\r\n        border-color: var(--accent);\r\n        box-shadow: 0 0 0 3px var(--accent-soft);\r\n      }\r\n\r\n      /* \u0421\u0442\u0430\u0440\u0442\u043E\u0432\u044B\u0439 \u043D\u043E\u043C\u0435\u0440 \u0441\u0447\u0451\u0442\u0447\u0438\u043A\u0430 \u2014 \u0441\u0442\u043E\u0438\u0442 \u0432\u043F\u043B\u043E\u0442\u043D\u0443\u044E \u043A \u043F\u043E\u043B\u043E\u0441\u0435 \u043F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440\u0430,\r\n         \u043A\u043E\u0442\u043E\u0440\u0430\u044F \u0435\u0433\u043E \u0438 \u043E\u0442\u0440\u0430\u0436\u0430\u0435\u0442. */\r\n      .names-start {\r\n        display: flex;\r\n        align-items: center;\r\n        gap: 8px;\r\n        margin-top: 12px;\r\n      }\r\n      .names-start-label {\r\n        color: var(--figma-color-text-secondary);\r\n        font-size: 11px;\r\n      }\r\n      .names-start-input {\r\n        width: 64px;\r\n        padding: 5px 8px;\r\n        border: 1px solid var(--figma-color-border);\r\n        border-radius: var(--radius-sm);\r\n        background: var(--figma-color-bg);\r\n        color: var(--figma-color-text);\r\n        font: inherit;\r\n      }\r\n      .names-start-input:focus {\r\n        outline: none;\r\n        border-color: var(--accent);\r\n        box-shadow: 0 0 0 3px var(--accent-soft);\r\n      }\r\n\r\n      .recent {\r\n        display: none;\r\n        margin-top: 8px;\r\n      }\r\n      .recent.is-visible {\r\n        display: block;\r\n      }\r\n      .recent-title {\r\n        font-size: 10px;\r\n        font-weight: 600;\r\n        color: var(--figma-color-text-secondary);\r\n        text-transform: uppercase;\r\n        letter-spacing: 0.5px;\r\n      }\r\n      .chips {\r\n        display: flex;\r\n        flex-wrap: wrap;\r\n        gap: 4px;\r\n        margin-top: 5px;\r\n      }\r\n      .chip {\r\n        margin: 0;\r\n        padding: 3px 9px;\r\n        border: 1px solid var(--figma-color-border);\r\n        border-radius: 999px;\r\n        background: var(--figma-color-bg);\r\n        color: var(--figma-color-text);\r\n        cursor: pointer;\r\n        font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;\r\n        font-size: 10.5px;\r\n        transition: background 0.15s ease, border-color 0.15s ease;\r\n      }\r\n      .chip:hover {\r\n        border-color: var(--accent);\r\n        background: var(--accent-soft);\r\n      }\r\n\r\n      .tree {\r\n        margin-top: 10px;\r\n        border-radius: var(--radius-sm);\r\n        background: var(--figma-color-bg-secondary);\r\n        overflow: hidden;\r\n      }\r\n      .tree-count {\r\n        font-weight: 500;\r\n        text-transform: none;\r\n        letter-spacing: 0;\r\n        color: var(--figma-color-text-secondary);\r\n      }\r\n      .tree-count.is-ready {\r\n        color: var(--accent);\r\n      }\r\n      .tree-body {\r\n        max-height: 270px;\r\n        padding: 4px 0;\r\n        overflow-y: auto;\r\n        background: var(--figma-color-bg);\r\n      }\r\n      .tree-row {\r\n        display: flex;\r\n        align-items: center;\r\n        gap: 2px;\r\n        padding-right: 6px;\r\n        padding-left: calc(4px + var(--depth) * 12px);\r\n        /* \u041D\u0430\u043F\u0440\u0430\u0432\u043B\u044F\u044E\u0449\u0438\u0435 \u0432\u043B\u043E\u0436\u0435\u043D\u043D\u043E\u0441\u0442\u0438: \u043F\u043E 1px \u043B\u0438\u043D\u0438\u0438 \u043D\u0430 \u043A\u0430\u0436\u0434\u044B\u0439 \u0443\u0440\u043E\u0432\u0435\u043D\u044C \u043E\u0442\u0441\u0442\u0443\u043F\u0430. */\r\n        background-image: repeating-linear-gradient(\r\n          to right,\r\n          var(--figma-color-border) 0 1px,\r\n          transparent 1px 12px\r\n        );\r\n        background-repeat: no-repeat;\r\n        background-position: 11px 0;\r\n        background-size: calc(var(--depth) * 12px) 100%;\r\n        transition: background-color 0.12s ease;\r\n      }\r\n      .tree-row:hover,\r\n      .tree-row:focus-within {\r\n        background-color: var(--figma-color-bg-hover);\r\n      }\r\n      .tree-toggle {\r\n        flex: 0 0 20px;\r\n        width: 20px;\r\n        height: 26px;\r\n        margin: 0;\r\n        padding: 0;\r\n        display: flex;\r\n        align-items: center;\r\n        justify-content: center;\r\n        border: none;\r\n        border-radius: 4px;\r\n        background: transparent;\r\n        color: var(--figma-color-text-secondary);\r\n        cursor: pointer;\r\n        font: inherit;\r\n      }\r\n      .tree-toggle svg {\r\n        transition: transform 0.12s ease;\r\n      }\r\n      .tree-toggle[aria-expanded="true"] svg {\r\n        transform: rotate(90deg);\r\n      }\r\n      .tree-toggle:hover {\r\n        color: var(--figma-color-text);\r\n      }\r\n      .tree-toggle.is-leaf {\r\n        visibility: hidden;\r\n        pointer-events: none;\r\n      }\r\n      .tree-apply {\r\n        flex: 1;\r\n        min-width: 0;\r\n        margin: 0;\r\n        padding: 5px 7px;\r\n        border: none;\r\n        border-radius: 5px;\r\n        background: transparent;\r\n        color: var(--figma-color-text);\r\n        cursor: pointer;\r\n        text-align: left;\r\n        font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;\r\n        font-size: 11px;\r\n        white-space: nowrap;\r\n        overflow: hidden;\r\n        text-overflow: ellipsis;\r\n      }\r\n      .tree-apply.is-group {\r\n        font-weight: 600;\r\n      }\r\n      .tree-apply.is-leaf {\r\n        color: var(--figma-color-text-secondary);\r\n      }\r\n      .tree-apply:focus-visible {\r\n        outline: none;\r\n        box-shadow: inset 0 0 0 1px var(--accent);\r\n      }\r\n      /* \u0421\u0432\u043E\u0439 \u0442\u0438\u043F: \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D \u0438\u043B\u0438 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u043D \u043E\u0442\u043D\u043E\u0441\u0438\u0442\u0435\u043B\u044C\u043D\u043E \u0441\u0442\u0430\u043D\u0434\u0430\u0440\u0442\u043D\u043E\u0433\u043E \u043D\u0430\u0431\u043E\u0440\u0430. */\r\n      .tree-apply.is-custom::after {\r\n        content: "";\r\n        display: inline-block;\r\n        width: 4px;\r\n        height: 4px;\r\n        margin-left: 6px;\r\n        border-radius: 50%;\r\n        vertical-align: middle;\r\n        background: var(--accent);\r\n      }\r\n      .tree-empty {\r\n        padding: 16px 10px;\r\n        color: var(--figma-color-text-secondary);\r\n        font-size: 11px;\r\n        text-align: center;\r\n      }\r\n\r\n      /* \u0420\u0435\u0436\u0438\u043C \u043F\u0440\u0430\u0432\u043A\u0438 \u0434\u0435\u0440\u0435\u0432\u0430 */\r\n      .tree-header-right {\r\n        display: flex;\r\n        align-items: center;\r\n        gap: 8px;\r\n      }\r\n      .tree-editbar {\r\n        display: none;\r\n        gap: 4px;\r\n        align-items: center;\r\n        padding: 0 6px 6px;\r\n        background: var(--figma-color-bg-secondary);\r\n      }\r\n      .tree.is-editing .tree-editbar {\r\n        display: flex;\r\n      }\r\n      .tree-editbar .confirm-text {\r\n        font-size: 10.5px;\r\n        color: var(--figma-color-text-secondary);\r\n        margin-left: auto;\r\n      }\r\n      .tree-actions {\r\n        display: none;\r\n        flex: 0 0 auto;\r\n        gap: 1px;\r\n        /* \u041F\u0440\u0438\u0433\u043B\u0443\u0448\u0435\u043D\u044B, \u043F\u043E\u043A\u0430 \u0441\u0442\u0440\u043E\u043A\u0430 \u043D\u0435 \u043F\u043E\u0434 \u043A\u0443\u0440\u0441\u043E\u0440\u043E\u043C: 71 \u0441\u0442\u0440\u043E\u043A\u0430 \u0438\u043D\u0430\u0447\u0435 \u0440\u044F\u0431\u0438\u0442. */\r\n        opacity: 0.4;\r\n        transition: opacity 0.12s ease;\r\n      }\r\n      .tree.is-editing .tree-actions {\r\n        display: flex;\r\n      }\r\n      .tree-row:hover .tree-actions,\r\n      .tree-row:focus-within .tree-actions {\r\n        opacity: 1;\r\n      }\r\n      .icon-btn {\r\n        display: flex;\r\n        align-items: center;\r\n        justify-content: center;\r\n        width: 24px;\r\n        height: 24px;\r\n        margin: 0;\r\n        padding: 0;\r\n        border: none;\r\n        border-radius: 5px;\r\n        background: transparent;\r\n        color: var(--figma-color-text-secondary);\r\n        cursor: pointer;\r\n        font: inherit;\r\n        transition: background 0.12s ease, color 0.12s ease;\r\n      }\r\n      .icon-btn:hover {\r\n        background: var(--figma-color-bg-secondary);\r\n        color: var(--figma-color-text);\r\n      }\r\n      .icon-btn:focus-visible {\r\n        outline: none;\r\n        box-shadow: 0 0 0 2px var(--accent-soft);\r\n        color: var(--figma-color-text);\r\n      }\r\n      .icon-btn.is-danger:hover {\r\n        background: rgba(239, 68, 68, 0.16);\r\n        color: #ef4444;\r\n      }\r\n      .tree-confirm {\r\n        display: flex;\r\n        align-items: center;\r\n        gap: 6px;\r\n        flex: 1;\r\n        min-width: 0;\r\n        padding: 3px 6px;\r\n        font-size: 10.5px;\r\n        color: var(--figma-color-text-secondary);\r\n      }\r\n      .tree-confirm span {\r\n        overflow: hidden;\r\n        text-overflow: ellipsis;\r\n        white-space: nowrap;\r\n      }\r\n      .tree-confirm button {\r\n        flex: 0 0 auto;\r\n        margin: 0;\r\n        padding: 2px 7px;\r\n        border: none;\r\n        border-radius: 4px;\r\n        background: var(--figma-color-bg-secondary);\r\n        color: var(--figma-color-text);\r\n        cursor: pointer;\r\n        font: inherit;\r\n        font-size: 10.5px;\r\n      }\r\n      .tree-confirm button.is-danger {\r\n        background: rgba(239, 68, 68, 0.16);\r\n        color: #ef4444;\r\n      }\r\n      .tree-input {\r\n        flex: 1;\r\n        min-width: 0;\r\n        padding: 3px 6px;\r\n        border: 1px solid var(--accent);\r\n        border-radius: 5px;\r\n        background: var(--figma-color-bg);\r\n        color: var(--figma-color-text);\r\n        font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;\r\n        font-size: 11px;\r\n      }\r\n      .tree-input:focus {\r\n        outline: none;\r\n        box-shadow: 0 0 0 3px var(--accent-soft);\r\n      }\r\n\r\n      /* \u041F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440 \u2014 \u0440\u0430\u043C\u043A\u0430 \u0431\u0435\u0437 \u0437\u0430\u043B\u0438\u0432\u043A\u0438, \u0441\u0442\u0430\u0442\u0443\u0441 \u2014 \u0437\u0430\u043B\u0438\u0432\u043A\u0430. \u0420\u0430\u043D\u044C\u0448\u0435 \u0443 \u043E\u0431\u043E\u0438\u0445 \u0431\u044B\u043B\r\n         \u043E\u0434\u0438\u043D\u0430\u043A\u043E\u0432\u044B\u0439 \u0444\u043E\u043D, \u0438 \u043E\u043D\u0438 \u0447\u0438\u0442\u0430\u043B\u0438\u0441\u044C \u043A\u0430\u043A \u043E\u0434\u043D\u0430 \u0441\u0435\u0440\u0430\u044F \u043F\u043B\u0438\u0442\u0430. */\r\n      .preview {\r\n        margin-top: 8px;\r\n        padding: 6px 10px;\r\n        border: 1px solid var(--figma-color-border);\r\n        border-radius: var(--radius-sm);\r\n        background: transparent;\r\n        color: var(--figma-color-text-secondary);\r\n        font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;\r\n        font-size: 10.5px;\r\n        line-height: 16px;\r\n        min-height: 30px;\r\n        white-space: nowrap;\r\n        overflow: hidden;\r\n        text-overflow: ellipsis;\r\n      }\r\n      .preview.is-active {\r\n        border-color: var(--accent);\r\n        background: var(--accent-soft);\r\n        color: var(--figma-color-text);\r\n      }\r\n\r\n      /* \u0421\u0442\u0440\u043E\u043A\u0430 \u0441\u0442\u0430\u0442\u0443\u0441\u0430 \u0441 \u0441\u0441\u044B\u043B\u043A\u043E\u0439 \xAB\u041E\u0442\u043C\u0435\u043D\u0438\u0442\u044C\xBB \u0441\u043F\u0440\u0430\u0432\u0430. */\r\n      .status-row {\r\n        display: flex;\r\n        align-items: flex-start;\r\n        gap: 8px;\r\n        margin-top: 10px;\r\n        min-height: 34px;\r\n      }\r\n      .status-row .status {\r\n        flex: 1;\r\n        min-width: 0;\r\n        margin-top: 0;\r\n      }\r\n      .status-row .status:empty {\r\n        display: block;\r\n        background: transparent;\r\n      }\r\n      #namesUndo {\r\n        display: none;\r\n        flex: 0 0 auto;\r\n        margin: 0;\r\n        padding: 8px 10px;\r\n        border: 1px solid var(--figma-color-border);\r\n        border-radius: var(--radius-sm);\r\n        background: var(--figma-color-bg);\r\n        color: var(--accent);\r\n        cursor: pointer;\r\n        font: inherit;\r\n        font-size: 11px;\r\n        font-weight: 500;\r\n      }\r\n      #namesUndo.is-visible {\r\n        display: block;\r\n      }\r\n      #namesUndo:hover {\r\n        background: var(--accent-soft);\r\n        border-color: var(--accent);\r\n      }\r\n\r\n      /* \xAB\u041A\u0430\u043A \u044D\u0442\u043E \u0440\u0430\u0431\u043E\u0442\u0430\u0435\u0442\xBB */\r\n      details {\r\n        margin-top: 14px;\r\n        font-size: 11px;\r\n        color: var(--figma-color-text-secondary);\r\n      }\r\n      details summary {\r\n        cursor: pointer;\r\n        color: var(--figma-color-text);\r\n        padding: 6px 0;\r\n        list-style: none;\r\n        font-weight: 500;\r\n        user-select: none;\r\n      }\r\n      details summary::-webkit-details-marker {\r\n        display: none;\r\n      }\r\n      details summary::before {\r\n        content: "\u203A";\r\n        display: inline-block;\r\n        width: 12px;\r\n        margin-right: 4px;\r\n        color: var(--figma-color-text-secondary);\r\n        transition: transform 0.15s ease;\r\n      }\r\n      details[open] summary::before {\r\n        transform: rotate(90deg);\r\n      }\r\n      details ul {\r\n        margin: 4px 0 0;\r\n        padding-left: 18px;\r\n      }\r\n      details li {\r\n        margin: 4px 0;\r\n        line-height: 1.5;\r\n      }\r\n      details code {\r\n        font-size: 10.5px;\r\n        padding: 1px 5px;\r\n        border-radius: 4px;\r\n        background: var(--figma-color-bg-secondary);\r\n        font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;\r\n      }\r\n\r\n      /* \u0411\u0430\u043D\u043D\u0435\u0440 \u043E\u0431\u043D\u043E\u0432\u043B\u0435\u043D\u0438\u044F */\r\n      .update-banner {\r\n        display: none;\r\n        margin: 0 0 12px;\r\n        padding: 10px 10px 10px 12px;\r\n        border-radius: var(--radius-md);\r\n        border: 1px solid var(--figma-color-border);\r\n        background: var(--figma-color-bg-secondary);\r\n        font-size: 11px;\r\n        line-height: 1.5;\r\n        color: var(--figma-color-text);\r\n      }\r\n      .update-banner.is-visible {\r\n        display: block;\r\n      }\r\n      .update-banner p {\r\n        margin: 0 0 8px;\r\n      }\r\n      .update-banner code {\r\n        font-size: 10.5px;\r\n        padding: 1px 5px;\r\n        border-radius: 4px;\r\n        background: var(--figma-color-bg);\r\n        font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;\r\n      }\r\n      .update-banner-actions {\r\n        display: flex;\r\n        align-items: center;\r\n        justify-content: flex-end;\r\n        gap: 8px;\r\n        margin-top: 2px;\r\n      }\r\n      .update-banner-actions button.linkish {\r\n        margin: 0;\r\n        padding: 4px 8px;\r\n        border: none;\r\n        background: transparent;\r\n        color: var(--figma-color-text-secondary);\r\n        cursor: pointer;\r\n        font: inherit;\r\n        font-size: 11px;\r\n        font-weight: 500;\r\n        border-radius: 4px;\r\n      }\r\n      .update-banner-actions button.linkish:hover {\r\n        background: var(--figma-color-bg-hover);\r\n        color: var(--figma-color-text);\r\n      }\r\n\r\n      .plugin-version-footer {\r\n        margin: 14px 0 0;\r\n        padding-top: 10px;\r\n        border-top: 1px solid var(--figma-color-border);\r\n        font-size: 10px;\r\n        color: var(--figma-color-text-secondary);\r\n        font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;\r\n      }\r\n    </style>\r\n  </head>\r\n  <body>\r\n    <div\r\n      id="updateBanner"\r\n      class="update-banner"\r\n      role="status"\r\n      aria-live="polite"\r\n    >\r\n      <p id="updateBannerBody"></p>\r\n      <div class="update-banner-actions">\r\n        <button type="button" class="linkish" id="updateBannerDismiss">\u0421\u043A\u0440\u044B\u0442\u044C</button>\r\n      </div>\r\n    </div>\r\n\r\n    <div class="tabs" role="tablist" aria-label="\u0420\u0430\u0437\u0434\u0435\u043B\u044B \u043F\u043B\u0430\u0433\u0438\u043D\u0430">\r\n      <button\r\n        type="button"\r\n        role="tab"\r\n        id="tabRaster"\r\n        aria-selected="true"\r\n        aria-controls="panelRaster"\r\n      >\r\n        \u0420\u0430\u0441\u0442\u0440\r\n      </button>\r\n      <button\r\n        type="button"\r\n        role="tab"\r\n        id="tabMo4"\r\n        aria-selected="false"\r\n        aria-controls="panelMo4"\r\n      >\r\n        \u041A\u0440\u0430\u0442\u043D\u043E\u0441\u0442\u044C 4\r\n      </button>\r\n      <button\r\n        type="button"\r\n        role="tab"\r\n        id="tabNames"\r\n        aria-selected="false"\r\n        aria-controls="panelNames"\r\n      >\r\n        \u0420\u0435\u043D\u0435\u0439\u043C\u0438\u043D\u0433\r\n      </button>\r\n      <button\r\n        type="button"\r\n        role="tab"\r\n        id="tabPsd"\r\n        aria-selected="false"\r\n        aria-controls="panelPsd"\r\n      >\r\n        PSD\r\n      </button>\r\n    </div>\r\n\r\n    <div\r\n      id="panelRaster"\r\n      class="panel is-active"\r\n      role="tabpanel"\r\n      aria-labelledby="tabRaster"\r\n    >\r\n      <p class="hint">\r\n        \u041F\u0440\u0435\u0432\u0440\u0430\u0449\u0430\u0435\u0442 \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u043D\u044B\u0439 \u0441\u043B\u043E\u0439 \u0432 PNG \u043F\u0440\u044F\u043C\u043E \u043D\u0430 \u043A\u0430\u043D\u0432\u0430\u0441\u0435 \u2014 \u043F\u0440\u044F\u043C\u043E\u0443\u0433\u043E\u043B\u044C\u043D\u0438\u043A\r\n        \u0441 \u043A\u0430\u0440\u0442\u0438\u043D\u043A\u043E\u0439-\u0437\u0430\u043B\u0438\u0432\u043A\u043E\u0439.\r\n      </p>\r\n\r\n      <label class="field" for="scale">\u041C\u0430\u0441\u0448\u0442\u0430\u0431</label>\r\n      <select id="scale" aria-label="\u041C\u0430\u0441\u0448\u0442\u0430\u0431 \u044D\u043A\u0441\u043F\u043E\u0440\u0442\u0430">\r\n        <option value="1">1\xD7</option>\r\n        <option value="2">2\xD7</option>\r\n        <option value="3">3\xD7</option>\r\n        <option value="4">4\xD7</option>\r\n      </select>\r\n\r\n      <div class="field" id="originalDispositionLabel">\u041E\u0440\u0438\u0433\u0438\u043D\u0430\u043B</div>\r\n      <div\r\n        class="segmented"\r\n        id="originalDisposition"\r\n        role="radiogroup"\r\n        aria-labelledby="originalDispositionLabel"\r\n      >\r\n        <button type="button" role="radio" aria-checked="true" data-value="keep" tabindex="0">\r\n          \u041E\u0441\u0442\u0430\u0432\u0438\u0442\u044C\r\n        </button>\r\n        <button type="button" role="radio" aria-checked="false" data-value="replace" tabindex="-1">\r\n          \u0417\u0430\u043C\u0435\u043D\u0438\u0442\u044C\r\n        </button>\r\n        <button type="button" role="radio" aria-checked="false" data-value="hide" tabindex="-1">\r\n          \u0421\u043A\u0440\u044B\u0442\u044C\r\n        </button>\r\n      </div>\r\n\r\n      <button type="button" class="primary action-full" id="goRaster">\u0412 \u0440\u0430\u0441\u0442\u0440</button>\r\n      <div class="status" id="rasterStatus" role="status"></div>\r\n    </div>\r\n\r\n    <div id="panelMo4" class="panel" role="tabpanel" aria-labelledby="tabMo4">\r\n      <p class="hint">\r\n        \u041F\u0440\u043E\u0432\u0435\u0440\u044F\u0435\u0442, \u0447\u0442\u043E \u0448\u0438\u0440\u0438\u043D\u0430 \u0438 \u0432\u044B\u0441\u043E\u0442\u0430 \u0441\u043B\u043E\u044F \u043A\u0440\u0430\u0442\u043D\u044B 4. \u0421\u0447\u0438\u0442\u0430\u0435\u0442 \u043F\u043E \u0432\u0438\u0437\u0443\u0430\u043B\u044C\u043D\u043E\u043C\u0443\r\n        \u0431\u043E\u043A\u0441\u0443 \u2014 \u0441 \u0443\u0447\u0451\u0442\u043E\u043C \u0442\u0435\u043D\u0435\u0439, \u043E\u0431\u0432\u043E\u0434\u043E\u043A \u0438 \u0440\u0430\u0437\u043C\u044B\u0442\u0438\u0439.\r\n      </p>\r\n\r\n      <div class="actions-row">\r\n        <button type="button" class="secondary" id="mo4Check">\u041F\u0440\u043E\u0432\u0435\u0440\u0438\u0442\u044C</button>\r\n        <button type="button" class="primary" id="mo4Fix">\u041F\u043E\u043F\u0440\u0430\u0432\u0438\u0442\u044C</button>\r\n      </div>\r\n\r\n      <div class="list-wrap" aria-label="\u0421\u043F\u0438\u0441\u043E\u043A \u043D\u0430\u0440\u0443\u0448\u0435\u043D\u0438\u0439">\r\n        <div class="list-header">\r\n          <span id="mo4ListTitle">\u0421\u043B\u043E\u0438 \u0441 \u043D\u0430\u0440\u0443\u0448\u0435\u043D\u0438\u0435\u043C</span>\r\n          <button\r\n            type="button"\r\n            class="linkish"\r\n            id="mo4SelectAll"\r\n            disabled\r\n            aria-label="\u0412\u044B\u0434\u0435\u043B\u0438\u0442\u044C \u0432\u0441\u0435 \u0441\u043B\u043E\u0438 \u0441 \u043D\u0430\u0440\u0443\u0448\u0435\u043D\u0438\u0435\u043C"\r\n          >\r\n            \u0412\u044B\u0434\u0435\u043B\u0438\u0442\u044C \u0432\u0441\u0435\r\n          </button>\r\n        </div>\r\n        <div class="list-body" id="mo4ListBody"></div>\r\n      </div>\r\n\r\n      <div class="status" id="mo4Status" role="status"></div>\r\n\r\n      <details>\r\n        <summary>\u041A\u0430\u043A \u044D\u0442\u043E \u0440\u0430\u0431\u043E\u0442\u0430\u0435\u0442</summary>\r\n        <ul>\r\n          <li>\r\n            <b>\u041F\u0440\u043E\u0432\u0435\u0440\u0438\u0442\u044C</b> \u043E\u0441\u0442\u0430\u0432\u0438\u0442 \u0432 \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u0438 \u0442\u043E\u043B\u044C\u043A\u043E \u0442\u0435 \u0441\u043B\u043E\u0438, \u0447\u044C\u0438 \u0440\u0430\u0437\u043C\u0435\u0440\u044B\r\n            \u043D\u0435 \u043A\u0440\u0430\u0442\u043D\u044B 4, \u0438 \u043F\u043E\u043A\u0430\u0436\u0435\u0442 \u0438\u0445 \u0441\u043F\u0438\u0441\u043A\u043E\u043C.\r\n          </li>\r\n          <li>\r\n            <b>\u041F\u043E\u043F\u0440\u0430\u0432\u0438\u0442\u044C</b> \u043E\u0431\u043E\u0440\u0430\u0447\u0438\u0432\u0430\u0435\u0442 \u0441\u043B\u043E\u0439 \u0444\u0440\u0435\u0439\u043C\u043E\u043C \u043D\u0443\u0436\u043D\u043E\u0433\u043E \u0440\u0430\u0437\u043C\u0435\u0440\u0430. \u0421\u0430\u043C\u0430\r\n            \u0433\u0440\u0430\u0444\u0438\u043A\u0430 \u043D\u0435 \u0440\u0430\u0441\u0442\u044F\u0433\u0438\u0432\u0430\u0435\u0442\u0441\u044F: \u043C\u0435\u043D\u044F\u0435\u0442\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u043A\u043E\u043D\u0442\u0435\u0439\u043D\u0435\u0440, \u0430\r\n            \u0441\u043E\u0434\u0435\u0440\u0436\u0438\u043C\u043E\u0435 \u0441\u0434\u0432\u0438\u0433\u0430\u0435\u0442\u0441\u044F \u0432\u043D\u0443\u0442\u0440\u0438 \u0442\u0430\u043A, \u0447\u0442\u043E\u0431\u044B \u0432\u0438\u0437\u0443\u0430\u043B\u044C\u043D\u043E \u043E\u0441\u0442\u0430\u0442\u044C\u0441\u044F \u043D\u0430 \u043C\u0435\u0441\u0442\u0435.\r\n          </li>\r\n          <li>\r\n            \u041F\u043E\u0441\u043B\u0435 \u041F\u043E\u043F\u0440\u0430\u0432\u0438\u0442\u044C \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u044B \u043E\u0431\u0451\u0440\u0442\u043A\u0438. \u0418\u0441\u0445\u043E\u0434\u043D\u044B\u0439 \u0441\u043B\u043E\u0439 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u043D\r\n            \u0432 <code>[no4] \u0438\u043C\u044F</code> \u2014 \u0447\u0442\u043E\u0431\u044B \u0432\u0438\u0434\u043D\u043E \u0431\u044B\u043B\u043E, \u043A\u0430\u043A\u0438\u0435 \u0441\u043B\u043E\u0438 \u0438\u0437\u043D\u0430\u0447\u0430\u043B\u044C\u043D\u043E\r\n            \u043D\u0435 \u043F\u0440\u043E\u0445\u043E\u0434\u0438\u043B\u0438 \u043F\u0440\u043E\u0432\u0435\u0440\u043A\u0443.\r\n          </li>\r\n        </ul>\r\n      </details>\r\n\r\n      <details id="mo4DebugWrap" hidden>\r\n        <summary>\u0414\u0438\u0430\u0433\u043D\u043E\u0441\u0442\u0438\u043A\u0430</summary>\r\n        <p class="hint">\r\n          \u041B\u043E\u0433 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0433\u043E \u0437\u0430\u043F\u0443\u0441\u043A\u0430 \u041F\u043E\u043F\u0440\u0430\u0432\u0438\u0442\u044C. \u0415\u0441\u043B\u0438 \u043E\u0431\u0451\u0440\u0442\u043A\u0430 \u0432\u0441\u0442\u0430\u043B\u0430 \u043D\u0435 \u0442\u0443\u0434\u0430 \u2014\r\n          \u0441\u043A\u043E\u043F\u0438\u0440\u0443\u0439\u0442\u0435 \u0438 \u043F\u0440\u0438\u0448\u043B\u0438\u0442\u0435.\r\n        </p>\r\n        <textarea\r\n          id="mo4DebugText"\r\n          class="debug-text"\r\n          readonly\r\n          rows="8"\r\n          aria-label="\u041B\u043E\u0433 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0433\u043E \u0437\u0430\u043F\u0443\u0441\u043A\u0430"\r\n        ></textarea>\r\n        <button type="button" class="secondary action-full" id="mo4DebugCopy">\r\n          \u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u0442\u044C\r\n        </button>\r\n      </details>\r\n    </div>\r\n\r\n    <div id="panelNames" class="panel" role="tabpanel" aria-labelledby="tabNames">\r\n      <!-- \u041E\u0442\u0434\u0435\u043B\u044C\u043D\u043E\u0439 \u043F\u043E\u0434\u0441\u043A\u0430\u0437\u043A\u0438 \u043D\u0435\u0442: \u043F\u043E\u043B\u043E\u0441\u0430 \u043F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440\u0430 \u043D\u0430\u0434 \u0441\u0442\u0430\u0442\u0443\u0441\u043E\u043C \u0433\u043E\u0432\u043E\u0440\u0438\u0442\r\n           \u0442\u043E \u0436\u0435 \u0441\u0430\u043C\u043E\u0435 \u0438 \u0432\u0441\u0435\u0433\u0434\u0430 \u0430\u043A\u0442\u0443\u0430\u043B\u044C\u043D\u044B\u043C \u0447\u0438\u0441\u043B\u043E\u043C \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u043D\u044B\u0445 \u0441\u043B\u043E\u0451\u0432. -->\r\n      <input\r\n        type="search"\r\n        class="search-input names-search-first"\r\n        id="namesSearch"\r\n        placeholder="\u041F\u043E\u0438\u0441\u043A \u043F\u043E \u0442\u0438\u043F\u0430\u043C \u2014 Eyes, Hair, Dress\u2026"\r\n        aria-label="\u041F\u043E\u0438\u0441\u043A \u043F\u043E \u0442\u0438\u043F\u0430\u043C"\r\n        autocomplete="off"\r\n      />\r\n\r\n      <div class="recent" id="namesRecent">\r\n        <div class="recent-title">\u041D\u0435\u0434\u0430\u0432\u043D\u0438\u0435</div>\r\n        <div class="chips" id="namesRecentChips"></div>\r\n      </div>\r\n\r\n      <div class="tree" id="namesTree" aria-label="\u0422\u0438\u043F\u044B \u0441\u043B\u043E\u0451\u0432">\r\n        <div class="list-header">\r\n          <span>\u0422\u0438\u043F\u044B \u0441\u043B\u043E\u0451\u0432</span>\r\n          <span class="tree-header-right">\r\n            <button\r\n              type="button"\r\n              class="linkish"\r\n              id="namesEditToggle"\r\n              aria-pressed="false"\r\n            >\r\n              \u0418\u0437\u043C\u0435\u043D\u0438\u0442\u044C\r\n            </button>\r\n          </span>\r\n        </div>\r\n        <div class="tree-editbar" id="namesEditBar">\r\n          <button type="button" class="linkish" id="namesAddRoot">+ \u0422\u0438\u043F</button>\r\n          <button type="button" class="linkish" id="namesReset">\u0421\u0431\u0440\u043E\u0441\u0438\u0442\u044C</button>\r\n          <span class="confirm-text" id="namesEditHint">\u043A\u043B\u0438\u043A \u043F\u043E \u0441\u0442\u0440\u043E\u043A\u0435 \u2014 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u0442\u044C</span>\r\n        </div>\r\n        <div class="tree-body" id="namesTreeBody" role="tree"></div>\r\n      </div>\r\n\r\n      <div class="names-start">\r\n        <label class="names-start-label" for="namesStart">\u041D\u0430\u0447\u0430\u0442\u044C \u0441</label>\r\n        <input\r\n          type="number"\r\n          class="names-start-input"\r\n          id="namesStart"\r\n          value="1"\r\n          min="1"\r\n          max="9999"\r\n          step="1"\r\n          inputmode="numeric"\r\n          aria-label="\u041D\u043E\u043C\u0435\u0440, \u0441 \u043A\u043E\u0442\u043E\u0440\u043E\u0433\u043E \u043D\u0430\u0447\u0438\u043D\u0430\u0435\u0442\u0441\u044F \u0441\u0447\u0451\u0442\u0447\u0438\u043A"\r\n        />\r\n      </div>\r\n\r\n      <div class="preview" id="namesPreview" aria-live="polite"></div>\r\n      <div class="status-row">\r\n        <div class="status" id="namesStatus" role="status"></div>\r\n        <button type="button" id="namesUndo">\u041E\u0442\u043C\u0435\u043D\u0438\u0442\u044C</button>\r\n      </div>\r\n\r\n      <details>\r\n        <summary>\u041A\u0430\u043A \u044D\u0442\u043E \u0440\u0430\u0431\u043E\u0442\u0430\u0435\u0442</summary>\r\n        <ul>\r\n          <li>\r\n            \u041F\u043E\u0440\u044F\u0434\u043E\u043A \u2014 <b>\u0441\u0432\u0435\u0440\u0445\u0443 \u0432\u043D\u0438\u0437</b> \u043F\u043E \u043F\u0430\u043D\u0435\u043B\u0438 Layers, \u0430 \u043D\u0435 \u043F\u043E \u043F\u043E\u0440\u044F\u0434\u043A\u0443\r\n            \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u044F. \u0421\u0447\u0438\u0442\u0430\u0435\u0442\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u0442\u0435\u043A\u0443\u0449\u0435\u0435 \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u0435.\r\n          </li>\r\n          <li>\r\n            \u0422\u0438\u043F-<b>\u0433\u0440\u0443\u043F\u043F\u0430</b> (<code>Eyes_</code>) \u0434\u0430\u0451\u0442\r\n            <code>Eyes_01</code>, <code>Eyes_02</code>\u2026\r\n          </li>\r\n          <li>\r\n            \u0422\u0438\u043F-<b>\u043B\u0438\u0441\u0442</b> (<code>Eyes_01_R_TopLash</code>) \u2014 \u044D\u0442\u043E \u0448\u0430\u0431\u043B\u043E\u043D:\r\n            \u0440\u0430\u0441\u0442\u0451\u0442 \u0441\u0435\u0433\u043C\u0435\u043D\u0442 <code>01</code> \u2192\r\n            <code>Eyes_02_R_TopLash</code>. \u041E\u0434\u0438\u043D \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u043D\u044B\u0439 \u0441\u043B\u043E\u0439 \u043F\u043E\u043B\u0443\u0447\u0438\u0442\r\n            \u0438\u043C\u044F \u0440\u043E\u0432\u043D\u043E \u043A\u0430\u043A \u0432 \u0441\u043F\u0438\u0441\u043A\u0435.\r\n          </li>\r\n          <li>\r\n            <b>\u041D\u0430\u0447\u0430\u0442\u044C \u0441</b> \u0437\u0430\u0434\u0430\u0451\u0442 \u043F\u0435\u0440\u0432\u044B\u0439 \u043D\u043E\u043C\u0435\u0440 \u0441\u0447\u0451\u0442\u0447\u0438\u043A\u0430 \u2014 \u043F\u0440\u0438\r\n            <code>5</code> \u0432\u044B\u0439\u0434\u0435\u0442 <code>Eyes_05</code>, <code>Eyes_06</code>\u2026\r\n            \u041F\u043E \u0443\u043C\u043E\u043B\u0447\u0430\u043D\u0438\u044E 1, \u043F\u0440\u0438 \u043A\u0430\u0436\u0434\u043E\u043C \u043E\u0442\u043A\u0440\u044B\u0442\u0438\u0438 \u043F\u043B\u0430\u0433\u0438\u043D\u0430 \u0441\u0431\u0440\u0430\u0441\u044B\u0432\u0430\u0435\u0442\u0441\u044F \u043E\u0431\u0440\u0430\u0442\u043D\u043E.\r\n          </li>\r\n          <li>\r\n            \u041D\u0430\u0432\u0435\u0434\u0438\u0442\u0435 \u043D\u0430 \u0441\u0442\u0440\u043E\u043A\u0443 \u2014 \u0432 \u043F\u043E\u043B\u043E\u0441\u0435 \u043F\u043E\u0434 \u0441\u043F\u0438\u0441\u043A\u043E\u043C \u0432\u0438\u0434\u043D\u043E, \u043A\u0430\u043A\u0438\u0435 \u0438\u043C\u0435\u043D\u0430\r\n            \u043F\u043E\u043B\u0443\u0447\u0430\u0442\u0441\u044F. \u0421\u0442\u0440\u0435\u043B\u043A\u0430 \u0441\u043B\u0435\u0432\u0430 \u0440\u0430\u0441\u043A\u0440\u044B\u0432\u0430\u0435\u0442 \u0432\u043B\u043E\u0436\u0435\u043D\u043D\u044B\u0435 \u0442\u0438\u043F\u044B.\r\n          </li>\r\n        </ul>\r\n      </details>\r\n    </div>\r\n\r\n    <div id="panelPsd" class="panel" role="tabpanel" aria-labelledby="tabPsd">\r\n      <p class="hint">\r\n        \u0421\u043E\u0431\u0438\u0440\u0430\u0435\u0442 \u0438\u0437 \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u043D\u043E\u0433\u043E \u0444\u0440\u0435\u0439\u043C\u0430 \u0444\u0430\u0439\u043B .psd: \u043A\u0430\u0436\u0434\u044B\u0439 \u0441\u043B\u043E\u0439 Figma \u0441\u0442\u0430\u043D\u043E\u0432\u0438\u0442\u0441\u044F\r\n        \u0441\u043B\u043E\u0435\u043C Photoshop, \u0433\u0440\u0443\u043F\u043F\u044B \u0438 \u0438\u043C\u0435\u043D\u0430 \u0441\u043E\u0445\u0440\u0430\u043D\u044F\u044E\u0442\u0441\u044F.\r\n      </p>\r\n\r\n      <label class="field" for="psdScale">\u041C\u0430\u0441\u0448\u0442\u0430\u0431</label>\r\n      <select id="psdScale" aria-label="\u041C\u0430\u0441\u0448\u0442\u0430\u0431 \u044D\u043A\u0441\u043F\u043E\u0440\u0442\u0430 \u0432 PSD">\r\n        <option value="1">1\xD7</option>\r\n        <option value="2">2\xD7</option>\r\n        <option value="3">3\xD7</option>\r\n        <option value="4">4\xD7</option>\r\n      </select>\r\n\r\n      <button type="button" class="primary action-full" id="goPsd">\r\n        \u0421\u043E\u0431\u0440\u0430\u0442\u044C PSD\r\n      </button>\r\n      <button type="button" class="secondary action-full" id="psdCancel" hidden>\r\n        \u041E\u0442\u043C\u0435\u043D\u0438\u0442\u044C\r\n      </button>\r\n\r\n      <div class="psd-progress" id="psdProgressWrap" hidden>\r\n        <div class="psd-progress-bar" id="psdProgressBar"></div>\r\n      </div>\r\n\r\n      <div class="status" id="psdStatus" role="status"></div>\r\n\r\n      <div class="list-wrap" id="psdWarnWrap" aria-label="\u0417\u0430\u043C\u0435\u0447\u0430\u043D\u0438\u044F \u044D\u043A\u0441\u043F\u043E\u0440\u0442\u0430" hidden>\r\n        <div class="list-header">\r\n          <span>\u0417\u0430\u043C\u0435\u0447\u0430\u043D\u0438\u044F</span>\r\n        </div>\r\n        <div class="list-body" id="psdWarnBody"></div>\r\n      </div>\r\n\r\n      <details>\r\n        <summary>\u0427\u0442\u043E \u043F\u0435\u0440\u0435\u043D\u043E\u0441\u0438\u0442\u0441\u044F, \u0430 \u0447\u0442\u043E \u043D\u0435\u0442</summary>\r\n        <ul>\r\n          <li>\r\n            \u0424\u0440\u0435\u0439\u043C, \u0433\u0440\u0443\u043F\u043F\u0430, \u043A\u043E\u043C\u043F\u043E\u043D\u0435\u043D\u0442 \u0438 \u0438\u043D\u0441\u0442\u0430\u043D\u0441 \u0441\u0442\u0430\u043D\u043E\u0432\u044F\u0442\u0441\u044F <b>\u043F\u0430\u043F\u043A\u043E\u0439</b>;\r\n            \u0432\u0441\u0451 \u043E\u0441\u0442\u0430\u043B\u044C\u043D\u043E\u0435 \u2014 \u043E\u0431\u044B\u0447\u043D\u044B\u043C \u0441\u043B\u043E\u0435\u043C \u0441 \u043A\u0430\u0440\u0442\u0438\u043D\u043A\u043E\u0439.\r\n          </li>\r\n          <li>\r\n            \u0422\u0435\u043A\u0441\u0442, \u043F\u0440\u043E\u0437\u0440\u0430\u0447\u043D\u043E\u0441\u0442\u044C \u0438 \u0440\u0435\u0436\u0438\u043C\u044B \u043D\u0430\u043B\u043E\u0436\u0435\u043D\u0438\u044F <b>\u0437\u0430\u043F\u0435\u043A\u0430\u044E\u0442\u0441\u044F \u0432 \u043F\u0438\u043A\u0441\u0435\u043B\u0438</b>:\r\n            \u0432 Photoshop \u0441\u043B\u043E\u0439 \u0432\u044B\u0433\u043B\u044F\u0434\u0438\u0442 \u043A\u0430\u043A \u0432 Figma, \u043D\u043E \u043F\u0440\u0430\u0432\u0438\u0442\u0441\u044F \u043A\u0430\u043A \u0440\u0430\u0441\u0442\u0440.\r\n          </li>\r\n          <li>\r\n            \u0421\u043A\u0440\u044B\u0442\u044B\u0435 \u0441\u043B\u043E\u0438 \u043D\u0435 \u043F\u0435\u0440\u0435\u043D\u043E\u0441\u044F\u0442\u0441\u044F. \u0413\u0440\u0443\u043F\u043F\u0430 \u0441 \u043C\u0430\u0441\u043A\u043E\u0439 \u043F\u0440\u0438\u0435\u0437\u0436\u0430\u0435\u0442\r\n            <b>\u043E\u0434\u043D\u0438\u043C \u0433\u043E\u0442\u043E\u0432\u044B\u043C \u0441\u043B\u043E\u0435\u043C</b>.\r\n          </li>\r\n          <li>\r\n            \u0424\u0440\u0435\u0439\u043C \u0441 \u0441\u043E\u0431\u0441\u0442\u0432\u0435\u043D\u043D\u043E\u0439 \u0437\u0430\u043B\u0438\u0432\u043A\u043E\u0439 \u0438\u043B\u0438 \u044D\u0444\u0444\u0435\u043A\u0442\u043E\u043C \u0442\u043E\u0436\u0435 \u0441\u0445\u043B\u043E\u043F\u044B\u0432\u0430\u0435\u0442\u0441\u044F\r\n            \u0432 \u043E\u0434\u0438\u043D \u0441\u043B\u043E\u0439 \u2014 \u0438\u043D\u0430\u0447\u0435 \u043A\u0430\u0440\u0442\u0438\u043D\u043A\u0430 \u0440\u0430\u0437\u044A\u0435\u0434\u0435\u0442\u0441\u044F.\r\n          </li>\r\n        </ul>\r\n      </details>\r\n    </div>\r\n\r\n    <p id="pluginVersionFooter" class="plugin-version-footer" aria-live="polite">\r\n      \u0412\u0435\u0440\u0441\u0438\u044F: \u2026\r\n    </p>\r\n\r\n    <!-- \u0421\u044E\u0434\u0430 build.cjs \u0432\u0441\u0442\u0430\u0432\u043B\u044F\u0435\u0442 \u0441\u043E\u0431\u0440\u0430\u043D\u043D\u044B\u0439 src/ui/psdExport.ts (ag-psd).\r\n         \u0412 \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0438 \u0437\u0434\u0435\u0441\u044C \u043F\u0443\u0441\u0442\u043E: ui.html \u0447\u0438\u0442\u0430\u044E\u0442 \u043B\u044E\u0434\u0438, \u0431\u0430\u043D\u0434\u043B \u2014 \u043C\u0430\u0448\u0438\u043D\u044B. -->\r\n    <script id="kgpPsdBundle">"use strict";var KGP_PSD=(()=>{var Bc=Object.create;var Qn=Object.defineProperty;var Rc=Object.getOwnPropertyDescriptor;var jc=Object.getOwnPropertyNames;var zc=Object.getPrototypeOf,Nc=Object.prototype.hasOwnProperty;var ee=(e,n)=>()=>(n||e((n={exports:{}}).exports,n),n.exports),Vc=(e,n)=>{for(var t in n)Qn(e,t,{get:n[t],enumerable:!0})},Ur=(e,n,t,i)=>{if(n&&typeof n=="object"||typeof n=="function")for(let o of jc(n))!Nc.call(e,o)&&o!==t&&Qn(e,o,{get:()=>n[o],enumerable:!(i=Rc(n,o))||i.enumerable});return e};var Gc=(e,n,t)=>(t=e!=null?Bc(zc(e)):{},Ur(n||!e||!e.__esModule?Qn(t,"default",{value:e,enumerable:!0}):t,e)),Hc=e=>Ur(Qn({},"__esModule",{value:!0}),e);var es=ee((Hh,tn)=>{"use strict";function en(e){let n=e.length;for(;--n>=0;)e[n]=0}var Wc=0,jr=1,$c=2,Zc=3,Xc=258,ro=29,On=256,kn=On+1+ro,Qt=30,so=19,zr=2*kn+1,jt=15,Qi=16,qc=7,ao=256,Nr=16,Vr=17,Gr=18,io=new Uint8Array([0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0]),ei=new Uint8Array([0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13]),Kc=new Uint8Array([0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,3,7]),Hr=new Uint8Array([16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15]),Yc=512,gt=new Array((kn+2)*2);en(gt);var vn=new Array(Qt*2);en(vn);var In=new Array(Yc);en(In);var Fn=new Array(Xc-Zc+1);en(Fn);var lo=new Array(ro);en(lo);var ti=new Array(Qt);en(ti);function eo(e,n,t,i,o){this.static_tree=e,this.extra_bits=n,this.extra_base=t,this.elems=i,this.max_length=o,this.has_stree=e&&e.length}var Wr,$r,Zr;function to(e,n){this.dyn_tree=e,this.max_code=0,this.stat_desc=n}var Xr=e=>e<256?In[e]:In[256+(e>>>7)],Dn=(e,n)=>{e.pending_buf[e.pending++]=n&255,e.pending_buf[e.pending++]=n>>>8&255},Me=(e,n,t)=>{e.bi_valid>Qi-t?(e.bi_buf|=n<<e.bi_valid&65535,Dn(e,e.bi_buf),e.bi_buf=n>>Qi-e.bi_valid,e.bi_valid+=t-Qi):(e.bi_buf|=n<<e.bi_valid&65535,e.bi_valid+=t)},it=(e,n,t)=>{Me(e,t[n*2],t[n*2+1])},qr=(e,n)=>{let t=0;do t|=e&1,e>>>=1,t<<=1;while(--n>0);return t>>>1},Jc=e=>{e.bi_valid===16?(Dn(e,e.bi_buf),e.bi_buf=0,e.bi_valid=0):e.bi_valid>=8&&(e.pending_buf[e.pending++]=e.bi_buf&255,e.bi_buf>>=8,e.bi_valid-=8)},Qc=(e,n)=>{let t=n.dyn_tree,i=n.max_code,o=n.stat_desc.static_tree,r=n.stat_desc.has_stree,s=n.stat_desc.extra_bits,a=n.stat_desc.extra_base,l=n.stat_desc.max_length,c,d,h,f,u,p,_=0;for(f=0;f<=jt;f++)e.bl_count[f]=0;for(t[e.heap[e.heap_max]*2+1]=0,c=e.heap_max+1;c<zr;c++)d=e.heap[c],f=t[t[d*2+1]*2+1]+1,f>l&&(f=l,_++),t[d*2+1]=f,!(d>i)&&(e.bl_count[f]++,u=0,d>=a&&(u=s[d-a]),p=t[d*2],e.opt_len+=p*(f+u),r&&(e.static_len+=p*(o[d*2+1]+u)));if(_!==0){do{for(f=l-1;e.bl_count[f]===0;)f--;e.bl_count[f]--,e.bl_count[f+1]+=2,e.bl_count[l]--,_-=2}while(_>0);for(f=l;f!==0;f--)for(d=e.bl_count[f];d!==0;)h=e.heap[--c],!(h>i)&&(t[h*2+1]!==f&&(e.opt_len+=(f-t[h*2+1])*t[h*2],t[h*2+1]=f),d--)}},Kr=(e,n,t)=>{let i=new Array(jt+1),o=0,r,s;for(r=1;r<=jt;r++)o=o+t[r-1]<<1,i[r]=o;for(s=0;s<=n;s++){let a=e[s*2+1];a!==0&&(e[s*2]=qr(i[a]++,a))}},ed=()=>{let e,n,t,i,o,r=new Array(jt+1);for(t=0,i=0;i<ro-1;i++)for(lo[i]=t,e=0;e<1<<io[i];e++)Fn[t++]=i;for(Fn[t-1]=i,o=0,i=0;i<16;i++)for(ti[i]=o,e=0;e<1<<ei[i];e++)In[o++]=i;for(o>>=7;i<Qt;i++)for(ti[i]=o<<7,e=0;e<1<<ei[i]-7;e++)In[256+o++]=i;for(n=0;n<=jt;n++)r[n]=0;for(e=0;e<=143;)gt[e*2+1]=8,e++,r[8]++;for(;e<=255;)gt[e*2+1]=9,e++,r[9]++;for(;e<=279;)gt[e*2+1]=7,e++,r[7]++;for(;e<=287;)gt[e*2+1]=8,e++,r[8]++;for(Kr(gt,kn+1,r),e=0;e<Qt;e++)vn[e*2+1]=5,vn[e*2]=qr(e,5);Wr=new eo(gt,io,On+1,kn,jt),$r=new eo(vn,ei,0,Qt,jt),Zr=new eo(new Array(0),Kc,0,so,qc)},Yr=e=>{let n;for(n=0;n<kn;n++)e.dyn_ltree[n*2]=0;for(n=0;n<Qt;n++)e.dyn_dtree[n*2]=0;for(n=0;n<so;n++)e.bl_tree[n*2]=0;e.dyn_ltree[ao*2]=1,e.opt_len=e.static_len=0,e.sym_next=e.matches=0},Jr=e=>{e.bi_valid>8?Dn(e,e.bi_buf):e.bi_valid>0&&(e.pending_buf[e.pending++]=e.bi_buf),e.bi_buf=0,e.bi_valid=0},Lr=(e,n,t,i)=>{let o=n*2,r=t*2;return e[o]<e[r]||e[o]===e[r]&&i[n]<=i[t]},no=(e,n,t)=>{let i=e.heap[t],o=t<<1;for(;o<=e.heap_len&&(o<e.heap_len&&Lr(n,e.heap[o+1],e.heap[o],e.depth)&&o++,!Lr(n,i,e.heap[o],e.depth));)e.heap[t]=e.heap[o],t=o,o<<=1;e.heap[t]=i},Mr=(e,n,t)=>{let i,o,r=0,s,a;if(e.sym_next!==0)do i=e.pending_buf[e.sym_buf+r++]&255,i+=(e.pending_buf[e.sym_buf+r++]&255)<<8,o=e.pending_buf[e.sym_buf+r++],i===0?it(e,o,n):(s=Fn[o],it(e,s+On+1,n),a=io[s],a!==0&&(o-=lo[s],Me(e,o,a)),i--,s=Xr(i),it(e,s,t),a=ei[s],a!==0&&(i-=ti[s],Me(e,i,a)));while(r<e.sym_next);it(e,ao,n)},oo=(e,n)=>{let t=n.dyn_tree,i=n.stat_desc.static_tree,o=n.stat_desc.has_stree,r=n.stat_desc.elems,s,a,l=-1,c;for(e.heap_len=0,e.heap_max=zr,s=0;s<r;s++)t[s*2]!==0?(e.heap[++e.heap_len]=l=s,e.depth[s]=0):t[s*2+1]=0;for(;e.heap_len<2;)c=e.heap[++e.heap_len]=l<2?++l:0,t[c*2]=1,e.depth[c]=0,e.opt_len--,o&&(e.static_len-=i[c*2+1]);for(n.max_code=l,s=e.heap_len>>1;s>=1;s--)no(e,t,s);c=r;do s=e.heap[1],e.heap[1]=e.heap[e.heap_len--],no(e,t,1),a=e.heap[1],e.heap[--e.heap_max]=s,e.heap[--e.heap_max]=a,t[c*2]=t[s*2]+t[a*2],e.depth[c]=(e.depth[s]>=e.depth[a]?e.depth[s]:e.depth[a])+1,t[s*2+1]=t[a*2+1]=c,e.heap[1]=c++,no(e,t,1);while(e.heap_len>=2);e.heap[--e.heap_max]=e.heap[1],Qc(e,n),Kr(t,l,e.bl_count)},Tr=(e,n,t)=>{let i,o=-1,r,s=n[1],a=0,l=7,c=4;for(s===0&&(l=138,c=3),n[(t+1)*2+1]=65535,i=0;i<=t;i++)r=s,s=n[(i+1)*2+1],!(++a<l&&r===s)&&(a<c?e.bl_tree[r*2]+=a:r!==0?(r!==o&&e.bl_tree[r*2]++,e.bl_tree[Nr*2]++):a<=10?e.bl_tree[Vr*2]++:e.bl_tree[Gr*2]++,a=0,o=r,s===0?(l=138,c=3):r===s?(l=6,c=3):(l=7,c=4))},Br=(e,n,t)=>{let i,o=-1,r,s=n[1],a=0,l=7,c=4;for(s===0&&(l=138,c=3),i=0;i<=t;i++)if(r=s,s=n[(i+1)*2+1],!(++a<l&&r===s)){if(a<c)do it(e,r,e.bl_tree);while(--a!==0);else r!==0?(r!==o&&(it(e,r,e.bl_tree),a--),it(e,Nr,e.bl_tree),Me(e,a-3,2)):a<=10?(it(e,Vr,e.bl_tree),Me(e,a-3,3)):(it(e,Gr,e.bl_tree),Me(e,a-11,7));a=0,o=r,s===0?(l=138,c=3):r===s?(l=6,c=3):(l=7,c=4)}},td=e=>{let n;for(Tr(e,e.dyn_ltree,e.l_desc.max_code),Tr(e,e.dyn_dtree,e.d_desc.max_code),oo(e,e.bl_desc),n=so-1;n>=3&&e.bl_tree[Hr[n]*2+1]===0;n--);return e.opt_len+=3*(n+1)+5+5+4,n},nd=(e,n,t,i)=>{let o;for(Me(e,n-257,5),Me(e,t-1,5),Me(e,i-4,4),o=0;o<i;o++)Me(e,e.bl_tree[Hr[o]*2+1],3);Br(e,e.dyn_ltree,n-1),Br(e,e.dyn_dtree,t-1)},id=e=>{let n=4093624447,t;for(t=0;t<=31;t++,n>>>=1)if(n&1&&e.dyn_ltree[t*2]!==0)return 0;if(e.dyn_ltree[18]!==0||e.dyn_ltree[20]!==0||e.dyn_ltree[26]!==0)return 1;for(t=32;t<On;t++)if(e.dyn_ltree[t*2]!==0)return 1;return 0},Rr=!1,od=e=>{Rr||(ed(),Rr=!0),e.l_desc=new to(e.dyn_ltree,Wr),e.d_desc=new to(e.dyn_dtree,$r),e.bl_desc=new to(e.bl_tree,Zr),e.bi_buf=0,e.bi_valid=0,Yr(e)},Qr=(e,n,t,i)=>{Me(e,(Wc<<1)+(i?1:0),3),Jr(e),Dn(e,t),Dn(e,~t),t&&e.pending_buf.set(e.window.subarray(n,n+t),e.pending),e.pending+=t},rd=e=>{Me(e,jr<<1,3),it(e,ao,gt),Jc(e)},sd=(e,n,t,i)=>{let o,r,s=0;e.level>0?(e.strm.data_type===2&&(e.strm.data_type=id(e)),oo(e,e.l_desc),oo(e,e.d_desc),s=td(e),o=e.opt_len+3+7>>>3,r=e.static_len+3+7>>>3,r<=o&&(o=r)):o=r=t+5,t+4<=o&&n!==-1?Qr(e,n,t,i):e.strategy===4||r===o?(Me(e,(jr<<1)+(i?1:0),3),Mr(e,gt,vn)):(Me(e,($c<<1)+(i?1:0),3),nd(e,e.l_desc.max_code+1,e.d_desc.max_code+1,s+1),Mr(e,e.dyn_ltree,e.dyn_dtree)),Yr(e),i&&Jr(e)},ad=(e,n,t)=>(e.pending_buf[e.sym_buf+e.sym_next++]=n,e.pending_buf[e.sym_buf+e.sym_next++]=n>>8,e.pending_buf[e.sym_buf+e.sym_next++]=t,n===0?e.dyn_ltree[t*2]++:(e.matches++,n--,e.dyn_ltree[(Fn[t]+On+1)*2]++,e.dyn_dtree[Xr(n)*2]++),e.sym_next===e.sym_end);tn.exports._tr_init=od;tn.exports._tr_stored_block=Qr;tn.exports._tr_flush_block=sd;tn.exports._tr_tally=ad;tn.exports._tr_align=rd});var co=ee((Wh,ts)=>{"use strict";var ld=(e,n,t,i)=>{let o=e&65535|0,r=e>>>16&65535|0,s=0;for(;t!==0;){s=t>2e3?2e3:t,t-=s;do o=o+n[i++]|0,r=r+o|0;while(--s);o%=65521,r%=65521}return o|r<<16|0};ts.exports=ld});var fo=ee(($h,ns)=>{"use strict";var cd=()=>{let e,n=[];for(var t=0;t<256;t++){e=t;for(var i=0;i<8;i++)e=e&1?3988292384^e>>>1:e>>>1;n[t]=e}return n},dd=new Uint32Array(cd()),fd=(e,n,t,i)=>{let o=dd,r=i+t;e^=-1;for(let s=i;s<r;s++)e=e>>>8^o[(e^n[s])&255];return e^-1};ns.exports=fd});var ni=ee((Zh,is)=>{"use strict";is.exports={2:"need dictionary",1:"stream end",0:"","-1":"file error","-2":"stream error","-3":"data error","-4":"insufficient memory","-5":"buffer error","-6":"incompatible version"}});var vt=ee((Xh,os)=>{"use strict";os.exports={Z_NO_FLUSH:0,Z_PARTIAL_FLUSH:1,Z_SYNC_FLUSH:2,Z_FULL_FLUSH:3,Z_FINISH:4,Z_BLOCK:5,Z_TREES:6,Z_OK:0,Z_STREAM_END:1,Z_NEED_DICT:2,Z_ERRNO:-1,Z_STREAM_ERROR:-2,Z_DATA_ERROR:-3,Z_MEM_ERROR:-4,Z_BUF_ERROR:-5,Z_NO_COMPRESSION:0,Z_BEST_SPEED:1,Z_BEST_COMPRESSION:9,Z_DEFAULT_COMPRESSION:-1,Z_FILTERED:1,Z_HUFFMAN_ONLY:2,Z_RLE:3,Z_FIXED:4,Z_DEFAULT_STRATEGY:0,Z_BINARY:0,Z_TEXT:1,Z_UNKNOWN:2,Z_DEFLATED:8}});var ps=ee((qh,at)=>{"use strict";var{_tr_init:ud,_tr_stored_block:po,_tr_flush_block:hd,_tr_tally:Dt,_tr_align:pd}=es(),ls=co(),kt=fo(),gd=ni(),{Z_NO_FLUSH:Ot,Z_PARTIAL_FLUSH:md,Z_FULL_FLUSH:bd,Z_FINISH:He,Z_BLOCK:rs,Z_OK:ve,Z_STREAM_END:ss,Z_STREAM_ERROR:rt,Z_DATA_ERROR:yd,Z_BUF_ERROR:uo,Z_DEFAULT_COMPRESSION:wd,Z_FILTERED:Sd,Z_HUFFMAN_ONLY:ii,Z_RLE:_d,Z_FIXED:xd,Z_DEFAULT_STRATEGY:vd,Z_UNKNOWN:kd,Z_DEFLATED:oi}=vt(),Id=9,Fd=15,Dd=8,Od=29,Cd=256,go=Cd+1+Od,Ad=30,Ed=19,Pd=2*go+1,Ud=15,J=3,Ft=258,st=Ft+J+1,Ld=32,on=42,_o=57,mo=69,bo=73,yo=91,wo=103,zt=113,An=666,Ee=1,sn=2,Vt=3,an=4,Md=3,Nt=(e,n)=>(e.msg=gd[n],n),as=e=>e*2-(e>4?9:0),It=e=>{let n=e.length;for(;--n>=0;)e[n]=0},Td=e=>{let n,t,i,o=e.w_size;n=e.hash_size,i=n;do t=e.head[--i],e.head[i]=t>=o?t-o:0;while(--n);n=o,i=n;do t=e.prev[--i],e.prev[i]=t>=o?t-o:0;while(--n)},Bd=(e,n,t)=>(n<<e.hash_shift^t)&e.hash_mask,Ct=Bd,Be=e=>{let n=e.state,t=n.pending;t>e.avail_out&&(t=e.avail_out),t!==0&&(e.output.set(n.pending_buf.subarray(n.pending_out,n.pending_out+t),e.next_out),e.next_out+=t,n.pending_out+=t,e.total_out+=t,e.avail_out-=t,n.pending-=t,n.pending===0&&(n.pending_out=0))},Re=(e,n)=>{hd(e,e.block_start>=0?e.block_start:-1,e.strstart-e.block_start,n),e.block_start=e.strstart,Be(e.strm)},oe=(e,n)=>{e.pending_buf[e.pending++]=n},Cn=(e,n)=>{e.pending_buf[e.pending++]=n>>>8&255,e.pending_buf[e.pending++]=n&255},So=(e,n,t,i)=>{let o=e.avail_in;return o>i&&(o=i),o===0?0:(e.avail_in-=o,n.set(e.input.subarray(e.next_in,e.next_in+o),t),e.state.wrap===1?e.adler=ls(e.adler,n,o,t):e.state.wrap===2&&(e.adler=kt(e.adler,n,o,t)),e.next_in+=o,e.total_in+=o,o)},cs=(e,n)=>{let t=e.max_chain_length,i=e.strstart,o,r,s=e.prev_length,a=e.nice_match,l=e.strstart>e.w_size-st?e.strstart-(e.w_size-st):0,c=e.window,d=e.w_mask,h=e.prev,f=e.strstart+Ft,u=c[i+s-1],p=c[i+s];e.prev_length>=e.good_match&&(t>>=2),a>e.lookahead&&(a=e.lookahead);do if(o=n,!(c[o+s]!==p||c[o+s-1]!==u||c[o]!==c[i]||c[++o]!==c[i+1])){i+=2,o++;do;while(c[++i]===c[++o]&&c[++i]===c[++o]&&c[++i]===c[++o]&&c[++i]===c[++o]&&c[++i]===c[++o]&&c[++i]===c[++o]&&c[++i]===c[++o]&&c[++i]===c[++o]&&i<f);if(r=Ft-(f-i),i=f-Ft,r>s){if(e.match_start=n,s=r,r>=a)break;u=c[i+s-1],p=c[i+s]}}while((n=h[n&d])>l&&--t!==0);return s<=e.lookahead?s:e.lookahead},rn=e=>{let n=e.w_size,t,i,o;do{if(i=e.window_size-e.lookahead-e.strstart,e.strstart>=n+(n-st)&&(e.window.set(e.window.subarray(n,n+n-i),0),e.match_start-=n,e.strstart-=n,e.block_start-=n,e.insert>e.strstart&&(e.insert=e.strstart),Td(e),i+=n),e.strm.avail_in===0)break;if(t=So(e.strm,e.window,e.strstart+e.lookahead,i),e.lookahead+=t,e.lookahead+e.insert>=J)for(o=e.strstart-e.insert,e.ins_h=e.window[o],e.ins_h=Ct(e,e.ins_h,e.window[o+1]);e.insert&&(e.ins_h=Ct(e,e.ins_h,e.window[o+J-1]),e.prev[o&e.w_mask]=e.head[e.ins_h],e.head[e.ins_h]=o,o++,e.insert--,!(e.lookahead+e.insert<J)););}while(e.lookahead<st&&e.strm.avail_in!==0)},ds=(e,n)=>{let t=e.pending_buf_size-5>e.w_size?e.w_size:e.pending_buf_size-5,i,o,r,s=0,a=e.strm.avail_in;do{if(i=65535,r=e.bi_valid+42>>3,e.strm.avail_out<r||(r=e.strm.avail_out-r,o=e.strstart-e.block_start,i>o+e.strm.avail_in&&(i=o+e.strm.avail_in),i>r&&(i=r),i<t&&(i===0&&n!==He||n===Ot||i!==o+e.strm.avail_in)))break;s=n===He&&i===o+e.strm.avail_in?1:0,po(e,0,0,s),e.pending_buf[e.pending-4]=i,e.pending_buf[e.pending-3]=i>>8,e.pending_buf[e.pending-2]=~i,e.pending_buf[e.pending-1]=~i>>8,Be(e.strm),o&&(o>i&&(o=i),e.strm.output.set(e.window.subarray(e.block_start,e.block_start+o),e.strm.next_out),e.strm.next_out+=o,e.strm.avail_out-=o,e.strm.total_out+=o,e.block_start+=o,i-=o),i&&(So(e.strm,e.strm.output,e.strm.next_out,i),e.strm.next_out+=i,e.strm.avail_out-=i,e.strm.total_out+=i)}while(s===0);return a-=e.strm.avail_in,a&&(a>=e.w_size?(e.matches=2,e.window.set(e.strm.input.subarray(e.strm.next_in-e.w_size,e.strm.next_in),0),e.strstart=e.w_size,e.insert=e.strstart):(e.window_size-e.strstart<=a&&(e.strstart-=e.w_size,e.window.set(e.window.subarray(e.w_size,e.w_size+e.strstart),0),e.matches<2&&e.matches++,e.insert>e.strstart&&(e.insert=e.strstart)),e.window.set(e.strm.input.subarray(e.strm.next_in-a,e.strm.next_in),e.strstart),e.strstart+=a,e.insert+=a>e.w_size-e.insert?e.w_size-e.insert:a),e.block_start=e.strstart),e.high_water<e.strstart&&(e.high_water=e.strstart),s?an:n!==Ot&&n!==He&&e.strm.avail_in===0&&e.strstart===e.block_start?sn:(r=e.window_size-e.strstart,e.strm.avail_in>r&&e.block_start>=e.w_size&&(e.block_start-=e.w_size,e.strstart-=e.w_size,e.window.set(e.window.subarray(e.w_size,e.w_size+e.strstart),0),e.matches<2&&e.matches++,r+=e.w_size,e.insert>e.strstart&&(e.insert=e.strstart)),r>e.strm.avail_in&&(r=e.strm.avail_in),r&&(So(e.strm,e.window,e.strstart,r),e.strstart+=r,e.insert+=r>e.w_size-e.insert?e.w_size-e.insert:r),e.high_water<e.strstart&&(e.high_water=e.strstart),r=e.bi_valid+42>>3,r=e.pending_buf_size-r>65535?65535:e.pending_buf_size-r,t=r>e.w_size?e.w_size:r,o=e.strstart-e.block_start,(o>=t||(o||n===He)&&n!==Ot&&e.strm.avail_in===0&&o<=r)&&(i=o>r?r:o,s=n===He&&e.strm.avail_in===0&&i===o?1:0,po(e,e.block_start,i,s),e.block_start+=i,Be(e.strm)),s?Vt:Ee)},ho=(e,n)=>{let t,i;for(;;){if(e.lookahead<st){if(rn(e),e.lookahead<st&&n===Ot)return Ee;if(e.lookahead===0)break}if(t=0,e.lookahead>=J&&(e.ins_h=Ct(e,e.ins_h,e.window[e.strstart+J-1]),t=e.prev[e.strstart&e.w_mask]=e.head[e.ins_h],e.head[e.ins_h]=e.strstart),t!==0&&e.strstart-t<=e.w_size-st&&(e.match_length=cs(e,t)),e.match_length>=J)if(i=Dt(e,e.strstart-e.match_start,e.match_length-J),e.lookahead-=e.match_length,e.match_length<=e.max_lazy_match&&e.lookahead>=J){e.match_length--;do e.strstart++,e.ins_h=Ct(e,e.ins_h,e.window[e.strstart+J-1]),t=e.prev[e.strstart&e.w_mask]=e.head[e.ins_h],e.head[e.ins_h]=e.strstart;while(--e.match_length!==0);e.strstart++}else e.strstart+=e.match_length,e.match_length=0,e.ins_h=e.window[e.strstart],e.ins_h=Ct(e,e.ins_h,e.window[e.strstart+1]);else i=Dt(e,0,e.window[e.strstart]),e.lookahead--,e.strstart++;if(i&&(Re(e,!1),e.strm.avail_out===0))return Ee}return e.insert=e.strstart<J-1?e.strstart:J-1,n===He?(Re(e,!0),e.strm.avail_out===0?Vt:an):e.sym_next&&(Re(e,!1),e.strm.avail_out===0)?Ee:sn},nn=(e,n)=>{let t,i,o;for(;;){if(e.lookahead<st){if(rn(e),e.lookahead<st&&n===Ot)return Ee;if(e.lookahead===0)break}if(t=0,e.lookahead>=J&&(e.ins_h=Ct(e,e.ins_h,e.window[e.strstart+J-1]),t=e.prev[e.strstart&e.w_mask]=e.head[e.ins_h],e.head[e.ins_h]=e.strstart),e.prev_length=e.match_length,e.prev_match=e.match_start,e.match_length=J-1,t!==0&&e.prev_length<e.max_lazy_match&&e.strstart-t<=e.w_size-st&&(e.match_length=cs(e,t),e.match_length<=5&&(e.strategy===Sd||e.match_length===J&&e.strstart-e.match_start>4096)&&(e.match_length=J-1)),e.prev_length>=J&&e.match_length<=e.prev_length){o=e.strstart+e.lookahead-J,i=Dt(e,e.strstart-1-e.prev_match,e.prev_length-J),e.lookahead-=e.prev_length-1,e.prev_length-=2;do++e.strstart<=o&&(e.ins_h=Ct(e,e.ins_h,e.window[e.strstart+J-1]),t=e.prev[e.strstart&e.w_mask]=e.head[e.ins_h],e.head[e.ins_h]=e.strstart);while(--e.prev_length!==0);if(e.match_available=0,e.match_length=J-1,e.strstart++,i&&(Re(e,!1),e.strm.avail_out===0))return Ee}else if(e.match_available){if(i=Dt(e,0,e.window[e.strstart-1]),i&&Re(e,!1),e.strstart++,e.lookahead--,e.strm.avail_out===0)return Ee}else e.match_available=1,e.strstart++,e.lookahead--}return e.match_available&&(i=Dt(e,0,e.window[e.strstart-1]),e.match_available=0),e.insert=e.strstart<J-1?e.strstart:J-1,n===He?(Re(e,!0),e.strm.avail_out===0?Vt:an):e.sym_next&&(Re(e,!1),e.strm.avail_out===0)?Ee:sn},Rd=(e,n)=>{let t,i,o,r,s=e.window;for(;;){if(e.lookahead<=Ft){if(rn(e),e.lookahead<=Ft&&n===Ot)return Ee;if(e.lookahead===0)break}if(e.match_length=0,e.lookahead>=J&&e.strstart>0&&(o=e.strstart-1,i=s[o],i===s[++o]&&i===s[++o]&&i===s[++o])){r=e.strstart+Ft;do;while(i===s[++o]&&i===s[++o]&&i===s[++o]&&i===s[++o]&&i===s[++o]&&i===s[++o]&&i===s[++o]&&i===s[++o]&&o<r);e.match_length=Ft-(r-o),e.match_length>e.lookahead&&(e.match_length=e.lookahead)}if(e.match_length>=J?(t=Dt(e,1,e.match_length-J),e.lookahead-=e.match_length,e.strstart+=e.match_length,e.match_length=0):(t=Dt(e,0,e.window[e.strstart]),e.lookahead--,e.strstart++),t&&(Re(e,!1),e.strm.avail_out===0))return Ee}return e.insert=0,n===He?(Re(e,!0),e.strm.avail_out===0?Vt:an):e.sym_next&&(Re(e,!1),e.strm.avail_out===0)?Ee:sn},jd=(e,n)=>{let t;for(;;){if(e.lookahead===0&&(rn(e),e.lookahead===0)){if(n===Ot)return Ee;break}if(e.match_length=0,t=Dt(e,0,e.window[e.strstart]),e.lookahead--,e.strstart++,t&&(Re(e,!1),e.strm.avail_out===0))return Ee}return e.insert=0,n===He?(Re(e,!0),e.strm.avail_out===0?Vt:an):e.sym_next&&(Re(e,!1),e.strm.avail_out===0)?Ee:sn};function ot(e,n,t,i,o){this.good_length=e,this.max_lazy=n,this.nice_length=t,this.max_chain=i,this.func=o}var En=[new ot(0,0,0,0,ds),new ot(4,4,8,4,ho),new ot(4,5,16,8,ho),new ot(4,6,32,32,ho),new ot(4,4,16,16,nn),new ot(8,16,32,32,nn),new ot(8,16,128,128,nn),new ot(8,32,128,256,nn),new ot(32,128,258,1024,nn),new ot(32,258,258,4096,nn)],zd=e=>{e.window_size=2*e.w_size,It(e.head),e.max_lazy_match=En[e.level].max_lazy,e.good_match=En[e.level].good_length,e.nice_match=En[e.level].nice_length,e.max_chain_length=En[e.level].max_chain,e.strstart=0,e.block_start=0,e.lookahead=0,e.insert=0,e.match_length=e.prev_length=J-1,e.match_available=0,e.ins_h=0};function Nd(){this.strm=null,this.status=0,this.pending_buf=null,this.pending_buf_size=0,this.pending_out=0,this.pending=0,this.wrap=0,this.gzhead=null,this.gzindex=0,this.method=oi,this.last_flush=-1,this.w_size=0,this.w_bits=0,this.w_mask=0,this.window=null,this.window_size=0,this.prev=null,this.head=null,this.ins_h=0,this.hash_size=0,this.hash_bits=0,this.hash_mask=0,this.hash_shift=0,this.block_start=0,this.match_length=0,this.prev_match=0,this.match_available=0,this.strstart=0,this.match_start=0,this.lookahead=0,this.prev_length=0,this.max_chain_length=0,this.max_lazy_match=0,this.level=0,this.strategy=0,this.good_match=0,this.nice_match=0,this.dyn_ltree=new Uint16Array(Pd*2),this.dyn_dtree=new Uint16Array((2*Ad+1)*2),this.bl_tree=new Uint16Array((2*Ed+1)*2),It(this.dyn_ltree),It(this.dyn_dtree),It(this.bl_tree),this.l_desc=null,this.d_desc=null,this.bl_desc=null,this.bl_count=new Uint16Array(Ud+1),this.heap=new Uint16Array(2*go+1),It(this.heap),this.heap_len=0,this.heap_max=0,this.depth=new Uint16Array(2*go+1),It(this.depth),this.sym_buf=0,this.lit_bufsize=0,this.sym_next=0,this.sym_end=0,this.opt_len=0,this.static_len=0,this.matches=0,this.insert=0,this.bi_buf=0,this.bi_valid=0}var Pn=e=>{if(!e)return 1;let n=e.state;return!n||n.strm!==e||n.status!==on&&n.status!==_o&&n.status!==mo&&n.status!==bo&&n.status!==yo&&n.status!==wo&&n.status!==zt&&n.status!==An?1:0},fs=e=>{if(Pn(e))return Nt(e,rt);e.total_in=e.total_out=0,e.data_type=kd;let n=e.state;return n.pending=0,n.pending_out=0,n.wrap<0&&(n.wrap=-n.wrap),n.status=n.wrap===2?_o:n.wrap?on:zt,e.adler=n.wrap===2?0:1,n.last_flush=-2,ud(n),ve},us=e=>{let n=fs(e);return n===ve&&zd(e.state),n},Vd=(e,n)=>Pn(e)||e.state.wrap!==2?rt:(e.state.gzhead=n,ve),hs=(e,n,t,i,o,r)=>{if(!e)return rt;let s=1;if(n===wd&&(n=6),i<0?(s=0,i=-i):i>15&&(s=2,i-=16),o<1||o>Id||t!==oi||i<8||i>15||n<0||n>9||r<0||r>xd||i===8&&s!==1)return Nt(e,rt);i===8&&(i=9);let a=new Nd;return e.state=a,a.strm=e,a.status=on,a.wrap=s,a.gzhead=null,a.w_bits=i,a.w_size=1<<a.w_bits,a.w_mask=a.w_size-1,a.hash_bits=o+7,a.hash_size=1<<a.hash_bits,a.hash_mask=a.hash_size-1,a.hash_shift=~~((a.hash_bits+J-1)/J),a.window=new Uint8Array(a.w_size*2),a.head=new Uint16Array(a.hash_size),a.prev=new Uint16Array(a.w_size),a.lit_bufsize=1<<o+6,a.pending_buf_size=a.lit_bufsize*4,a.pending_buf=new Uint8Array(a.pending_buf_size),a.sym_buf=a.lit_bufsize,a.sym_end=(a.lit_bufsize-1)*3,a.level=n,a.strategy=r,a.method=t,us(e)},Gd=(e,n)=>hs(e,n,oi,Fd,Dd,vd),Hd=(e,n)=>{if(Pn(e)||n>rs||n<0)return e?Nt(e,rt):rt;let t=e.state;if(!e.output||e.avail_in!==0&&!e.input||t.status===An&&n!==He)return Nt(e,e.avail_out===0?uo:rt);let i=t.last_flush;if(t.last_flush=n,t.pending!==0){if(Be(e),e.avail_out===0)return t.last_flush=-1,ve}else if(e.avail_in===0&&as(n)<=as(i)&&n!==He)return Nt(e,uo);if(t.status===An&&e.avail_in!==0)return Nt(e,uo);if(t.status===on&&t.wrap===0&&(t.status=zt),t.status===on){let o=oi+(t.w_bits-8<<4)<<8,r=-1;if(t.strategy>=ii||t.level<2?r=0:t.level<6?r=1:t.level===6?r=2:r=3,o|=r<<6,t.strstart!==0&&(o|=Ld),o+=31-o%31,Cn(t,o),t.strstart!==0&&(Cn(t,e.adler>>>16),Cn(t,e.adler&65535)),e.adler=1,t.status=zt,Be(e),t.pending!==0)return t.last_flush=-1,ve}if(t.status===_o){if(e.adler=0,oe(t,31),oe(t,139),oe(t,8),t.gzhead)oe(t,(t.gzhead.text?1:0)+(t.gzhead.hcrc?2:0)+(t.gzhead.extra?4:0)+(t.gzhead.name?8:0)+(t.gzhead.comment?16:0)),oe(t,t.gzhead.time&255),oe(t,t.gzhead.time>>8&255),oe(t,t.gzhead.time>>16&255),oe(t,t.gzhead.time>>24&255),oe(t,t.level===9?2:t.strategy>=ii||t.level<2?4:0),oe(t,t.gzhead.os&255),t.gzhead.extra&&t.gzhead.extra.length&&(oe(t,t.gzhead.extra.length&255),oe(t,t.gzhead.extra.length>>8&255)),t.gzhead.hcrc&&(e.adler=kt(e.adler,t.pending_buf,t.pending,0)),t.gzindex=0,t.status=mo;else if(oe(t,0),oe(t,0),oe(t,0),oe(t,0),oe(t,0),oe(t,t.level===9?2:t.strategy>=ii||t.level<2?4:0),oe(t,Md),t.status=zt,Be(e),t.pending!==0)return t.last_flush=-1,ve}if(t.status===mo){if(t.gzhead.extra){let o=t.pending,r=(t.gzhead.extra.length&65535)-t.gzindex;for(;t.pending+r>t.pending_buf_size;){let a=t.pending_buf_size-t.pending;if(t.pending_buf.set(t.gzhead.extra.subarray(t.gzindex,t.gzindex+a),t.pending),t.pending=t.pending_buf_size,t.gzhead.hcrc&&t.pending>o&&(e.adler=kt(e.adler,t.pending_buf,t.pending-o,o)),t.gzindex+=a,Be(e),t.pending!==0)return t.last_flush=-1,ve;o=0,r-=a}let s=new Uint8Array(t.gzhead.extra);t.pending_buf.set(s.subarray(t.gzindex,t.gzindex+r),t.pending),t.pending+=r,t.gzhead.hcrc&&t.pending>o&&(e.adler=kt(e.adler,t.pending_buf,t.pending-o,o)),t.gzindex=0}t.status=bo}if(t.status===bo){if(t.gzhead.name){let o=t.pending,r;do{if(t.pending===t.pending_buf_size){if(t.gzhead.hcrc&&t.pending>o&&(e.adler=kt(e.adler,t.pending_buf,t.pending-o,o)),Be(e),t.pending!==0)return t.last_flush=-1,ve;o=0}t.gzindex<t.gzhead.name.length?r=t.gzhead.name.charCodeAt(t.gzindex++)&255:r=0,oe(t,r)}while(r!==0);t.gzhead.hcrc&&t.pending>o&&(e.adler=kt(e.adler,t.pending_buf,t.pending-o,o)),t.gzindex=0}t.status=yo}if(t.status===yo){if(t.gzhead.comment){let o=t.pending,r;do{if(t.pending===t.pending_buf_size){if(t.gzhead.hcrc&&t.pending>o&&(e.adler=kt(e.adler,t.pending_buf,t.pending-o,o)),Be(e),t.pending!==0)return t.last_flush=-1,ve;o=0}t.gzindex<t.gzhead.comment.length?r=t.gzhead.comment.charCodeAt(t.gzindex++)&255:r=0,oe(t,r)}while(r!==0);t.gzhead.hcrc&&t.pending>o&&(e.adler=kt(e.adler,t.pending_buf,t.pending-o,o))}t.status=wo}if(t.status===wo){if(t.gzhead.hcrc){if(t.pending+2>t.pending_buf_size&&(Be(e),t.pending!==0))return t.last_flush=-1,ve;oe(t,e.adler&255),oe(t,e.adler>>8&255),e.adler=0}if(t.status=zt,Be(e),t.pending!==0)return t.last_flush=-1,ve}if(e.avail_in!==0||t.lookahead!==0||n!==Ot&&t.status!==An){let o=t.level===0?ds(t,n):t.strategy===ii?jd(t,n):t.strategy===_d?Rd(t,n):En[t.level].func(t,n);if((o===Vt||o===an)&&(t.status=An),o===Ee||o===Vt)return e.avail_out===0&&(t.last_flush=-1),ve;if(o===sn&&(n===md?pd(t):n!==rs&&(po(t,0,0,!1),n===bd&&(It(t.head),t.lookahead===0&&(t.strstart=0,t.block_start=0,t.insert=0))),Be(e),e.avail_out===0))return t.last_flush=-1,ve}return n!==He?ve:t.wrap<=0?ss:(t.wrap===2?(oe(t,e.adler&255),oe(t,e.adler>>8&255),oe(t,e.adler>>16&255),oe(t,e.adler>>24&255),oe(t,e.total_in&255),oe(t,e.total_in>>8&255),oe(t,e.total_in>>16&255),oe(t,e.total_in>>24&255)):(Cn(t,e.adler>>>16),Cn(t,e.adler&65535)),Be(e),t.wrap>0&&(t.wrap=-t.wrap),t.pending!==0?ve:ss)},Wd=e=>{if(Pn(e))return rt;let n=e.state.status;return e.state=null,n===zt?Nt(e,yd):ve},$d=(e,n)=>{let t=n.length;if(Pn(e))return rt;let i=e.state,o=i.wrap;if(o===2||o===1&&i.status!==on||i.lookahead)return rt;if(o===1&&(e.adler=ls(e.adler,n,t,0)),i.wrap=0,t>=i.w_size){o===0&&(It(i.head),i.strstart=0,i.block_start=0,i.insert=0);let l=new Uint8Array(i.w_size);l.set(n.subarray(t-i.w_size,t),0),n=l,t=i.w_size}let r=e.avail_in,s=e.next_in,a=e.input;for(e.avail_in=t,e.next_in=0,e.input=n,rn(i);i.lookahead>=J;){let l=i.strstart,c=i.lookahead-(J-1);do i.ins_h=Ct(i,i.ins_h,i.window[l+J-1]),i.prev[l&i.w_mask]=i.head[i.ins_h],i.head[i.ins_h]=l,l++;while(--c);i.strstart=l,i.lookahead=J-1,rn(i)}return i.strstart+=i.lookahead,i.block_start=i.strstart,i.insert=i.lookahead,i.lookahead=0,i.match_length=i.prev_length=J-1,i.match_available=0,e.next_in=s,e.input=a,e.avail_in=r,i.wrap=o,ve};at.exports.deflateInit=Gd;at.exports.deflateInit2=hs;at.exports.deflateReset=us;at.exports.deflateResetKeep=fs;at.exports.deflateSetHeader=Vd;at.exports.deflate=Hd;at.exports.deflateEnd=Wd;at.exports.deflateSetDictionary=$d;at.exports.deflateInfo="pako deflate (from Nodeca project)"});var vo=ee((Kh,xo)=>{"use strict";var Zd=(e,n)=>Object.prototype.hasOwnProperty.call(e,n);xo.exports.assign=function(e){let n=Array.prototype.slice.call(arguments,1);for(;n.length;){let t=n.shift();if(t){if(typeof t!="object")throw new TypeError(t+"must be non-object");for(let i in t)Zd(t,i)&&(e[i]=t[i])}}return e};xo.exports.flattenChunks=e=>{let n=0;for(let i=0,o=e.length;i<o;i++)n+=e[i].length;let t=new Uint8Array(n);for(let i=0,o=0,r=e.length;i<r;i++){let s=e[i];t.set(s,o),o+=s.length}return t}});var ko=ee((Yh,ri)=>{"use strict";var gs=!0;try{String.fromCharCode.apply(null,new Uint8Array(1))}catch(e){gs=!1}var Un=new Uint8Array(256);for(let e=0;e<256;e++)Un[e]=e>=252?6:e>=248?5:e>=240?4:e>=224?3:e>=192?2:1;Un[254]=Un[254]=1;ri.exports.string2buf=e=>{if(typeof TextEncoder=="function"&&TextEncoder.prototype.encode)return new TextEncoder().encode(e);let n,t,i,o,r,s=e.length,a=0;for(o=0;o<s;o++)t=e.charCodeAt(o),(t&64512)===55296&&o+1<s&&(i=e.charCodeAt(o+1),(i&64512)===56320&&(t=65536+(t-55296<<10)+(i-56320),o++)),a+=t<128?1:t<2048?2:t<65536?3:4;for(n=new Uint8Array(a),r=0,o=0;r<a;o++)t=e.charCodeAt(o),(t&64512)===55296&&o+1<s&&(i=e.charCodeAt(o+1),(i&64512)===56320&&(t=65536+(t-55296<<10)+(i-56320),o++)),t<128?n[r++]=t:t<2048?(n[r++]=192|t>>>6,n[r++]=128|t&63):t<65536?(n[r++]=224|t>>>12,n[r++]=128|t>>>6&63,n[r++]=128|t&63):(n[r++]=240|t>>>18,n[r++]=128|t>>>12&63,n[r++]=128|t>>>6&63,n[r++]=128|t&63);return n};var Xd=(e,n)=>{if(n<65534&&e.subarray&&gs)return String.fromCharCode.apply(null,e.length===n?e:e.subarray(0,n));let t="";for(let i=0;i<n;i++)t+=String.fromCharCode(e[i]);return t};ri.exports.buf2string=(e,n)=>{let t=n||e.length;if(typeof TextDecoder=="function"&&TextDecoder.prototype.decode)return new TextDecoder().decode(e.subarray(0,n));let i,o,r=new Array(t*2);for(o=0,i=0;i<t;){let s=e[i++];if(s<128){r[o++]=s;continue}let a=Un[s];if(a>4){r[o++]=65533,i+=a-1;continue}for(s&=a===2?31:a===3?15:7;a>1&&i<t;)s=s<<6|e[i++]&63,a--;if(a>1){r[o++]=65533;continue}s<65536?r[o++]=s:(s-=65536,r[o++]=55296|s>>10&1023,r[o++]=56320|s&1023)}return Xd(r,o)};ri.exports.utf8border=(e,n)=>{n=n||e.length,n>e.length&&(n=e.length);let t=n-1;for(;t>=0&&(e[t]&192)===128;)t--;return t<0||t===0?n:t+Un[e[t]]>n?t:n}});var Io=ee((Jh,ms)=>{"use strict";function qd(){this.input=null,this.next_in=0,this.avail_in=0,this.total_in=0,this.output=null,this.next_out=0,this.avail_out=0,this.total_out=0,this.msg="",this.state=null,this.data_type=2,this.adler=0}ms.exports=qd});var Ss=ee((Qh,ln)=>{"use strict";var Ln=ps(),bs=vo(),ys=ko(),Fo=ni(),Kd=Io(),ws=Object.prototype.toString,{Z_NO_FLUSH:Yd,Z_SYNC_FLUSH:Jd,Z_FULL_FLUSH:Qd,Z_FINISH:ef,Z_OK:si,Z_STREAM_END:tf,Z_DEFAULT_COMPRESSION:nf,Z_DEFAULT_STRATEGY:of,Z_DEFLATED:rf}=vt();function Mn(e){this.options=bs.assign({level:nf,method:rf,chunkSize:16384,windowBits:15,memLevel:8,strategy:of},e||{});let n=this.options;n.raw&&n.windowBits>0?n.windowBits=-n.windowBits:n.gzip&&n.windowBits>0&&n.windowBits<16&&(n.windowBits+=16),this.err=0,this.msg="",this.ended=!1,this.chunks=[],this.strm=new Kd,this.strm.avail_out=0;let t=Ln.deflateInit2(this.strm,n.level,n.method,n.windowBits,n.memLevel,n.strategy);if(t!==si)throw new Error(Fo[t]);if(n.header&&Ln.deflateSetHeader(this.strm,n.header),n.dictionary){let i;if(typeof n.dictionary=="string"?i=ys.string2buf(n.dictionary):ws.call(n.dictionary)==="[object ArrayBuffer]"?i=new Uint8Array(n.dictionary):i=n.dictionary,t=Ln.deflateSetDictionary(this.strm,i),t!==si)throw new Error(Fo[t]);this._dict_set=!0}}Mn.prototype.push=function(e,n){let t=this.strm,i=this.options.chunkSize,o,r;if(this.ended)return!1;for(n===~~n?r=n:r=n===!0?ef:Yd,typeof e=="string"?t.input=ys.string2buf(e):ws.call(e)==="[object ArrayBuffer]"?t.input=new Uint8Array(e):t.input=e,t.next_in=0,t.avail_in=t.input.length;;){if(t.avail_out===0&&(t.output=new Uint8Array(i),t.next_out=0,t.avail_out=i),(r===Jd||r===Qd)&&t.avail_out<=6){this.onData(t.output.subarray(0,t.next_out)),t.avail_out=0;continue}if(o=Ln.deflate(t,r),o===tf)return t.next_out>0&&this.onData(t.output.subarray(0,t.next_out)),o=Ln.deflateEnd(this.strm),this.onEnd(o),this.ended=!0,o===si;if(t.avail_out===0){this.onData(t.output);continue}if(r>0&&t.next_out>0){this.onData(t.output.subarray(0,t.next_out)),t.avail_out=0;continue}if(t.avail_in===0)break}return!0};Mn.prototype.onData=function(e){this.chunks.push(e)};Mn.prototype.onEnd=function(e){e===si&&(this.result=bs.flattenChunks(this.chunks)),this.chunks=[],this.err=e,this.msg=this.strm.msg};function Do(e,n){let t=new Mn(n);if(t.push(e,!0),t.err)throw t.msg||Fo[t.err];return t.result}function sf(e,n){return n=n||{},n.raw=!0,Do(e,n)}function af(e,n){return n=n||{},n.gzip=!0,Do(e,n)}ln.exports.Deflate=Mn;ln.exports.deflate=Do;ln.exports.deflateRaw=sf;ln.exports.gzip=af;ln.exports.constants=vt()});var xs=ee((ep,_s)=>{"use strict";_s.exports=function(n,t){let i,o,r,s,a,l,c,d,h,f,u,p,_,b,y,S,x,v,F,C,I,E,L,M,j=n.state;i=n.next_in,L=n.input,o=i+(n.avail_in-5),r=n.next_out,M=n.output,s=r-(t-n.avail_out),a=r+(n.avail_out-257),l=j.dmax,c=j.wsize,d=j.whave,h=j.wnext,f=j.window,u=j.hold,p=j.bits,_=j.lencode,b=j.distcode,y=(1<<j.lenbits)-1,S=(1<<j.distbits)-1;e:do{p<15&&(u+=L[i++]<<p,p+=8,u+=L[i++]<<p,p+=8),x=_[u&y];t:for(;;){if(v=x>>>24,u>>>=v,p-=v,v=x>>>16&255,v===0)M[r++]=x&65535;else if(v&16){F=x&65535,v&=15,v&&(p<v&&(u+=L[i++]<<p,p+=8),F+=u&(1<<v)-1,u>>>=v,p-=v),p<15&&(u+=L[i++]<<p,p+=8,u+=L[i++]<<p,p+=8),x=b[u&S];n:for(;;){if(v=x>>>24,u>>>=v,p-=v,v=x>>>16&255,v&16){if(C=x&65535,v&=15,p<v&&(u+=L[i++]<<p,p+=8,p<v&&(u+=L[i++]<<p,p+=8)),C+=u&(1<<v)-1,C>l){n.msg="invalid distance too far back",j.mode=16209;break e}if(u>>>=v,p-=v,v=r-s,C>v){if(v=C-v,v>d&&j.sane){n.msg="invalid distance too far back",j.mode=16209;break e}if(I=0,E=f,h===0){if(I+=c-v,v<F){F-=v;do M[r++]=f[I++];while(--v);I=r-C,E=M}}else if(h<v){if(I+=c+h-v,v-=h,v<F){F-=v;do M[r++]=f[I++];while(--v);if(I=0,h<F){v=h,F-=v;do M[r++]=f[I++];while(--v);I=r-C,E=M}}}else if(I+=h-v,v<F){F-=v;do M[r++]=f[I++];while(--v);I=r-C,E=M}for(;F>2;)M[r++]=E[I++],M[r++]=E[I++],M[r++]=E[I++],F-=3;F&&(M[r++]=E[I++],F>1&&(M[r++]=E[I++]))}else{I=r-C;do M[r++]=M[I++],M[r++]=M[I++],M[r++]=M[I++],F-=3;while(F>2);F&&(M[r++]=M[I++],F>1&&(M[r++]=M[I++]))}}else if((v&64)===0){x=b[(x&65535)+(u&(1<<v)-1)];continue n}else{n.msg="invalid distance code",j.mode=16209;break e}break}}else if((v&64)===0){x=_[(x&65535)+(u&(1<<v)-1)];continue t}else if(v&32){j.mode=16191;break e}else{n.msg="invalid literal/length code",j.mode=16209;break e}break}}while(i<o&&r<a);F=p>>3,i-=F,p-=F<<3,u&=(1<<p)-1,n.next_in=i,n.next_out=r,n.avail_in=i<o?5+(o-i):5-(i-o),n.avail_out=r<a?257+(a-r):257-(r-a),j.hold=u,j.bits=p}});var ks=ee((tp,vs)=>{"use strict";var lf=new Uint16Array([3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258,0,0]),cf=new Uint8Array([16,16,16,16,16,16,16,16,17,17,17,17,18,18,18,18,19,19,19,19,20,20,20,20,21,21,21,21,16,72,78]),df=new Uint16Array([1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577,0,0]),ff=new Uint8Array([16,16,16,16,17,17,18,18,19,19,20,20,21,21,22,22,23,23,24,24,25,25,26,26,27,27,28,28,29,29,64,64]),uf=(e,n,t,i,o,r,s,a)=>{let l=a.bits,c=0,d=0,h=0,f=0,u=0,p=0,_=0,b=0,y=0,S=0,x,v,F,C,I,E=null,L,M=new Uint16Array(16),j=new Uint16Array(16),he=null,we,me,$;for(c=0;c<=15;c++)M[c]=0;for(d=0;d<i;d++)M[n[t+d]]++;for(u=l,f=15;f>=1&&M[f]===0;f--);if(u>f&&(u=f),f===0)return o[r++]=1<<24|64<<16|0,o[r++]=1<<24|64<<16|0,a.bits=1,0;for(h=1;h<f&&M[h]===0;h++);for(u<h&&(u=h),b=1,c=1;c<=15;c++)if(b<<=1,b-=M[c],b<0)return-1;if(b>0&&(e===0||f!==1))return-1;for(j[1]=0,c=1;c<15;c++)j[c+1]=j[c]+M[c];for(d=0;d<i;d++)n[t+d]!==0&&(s[j[n[t+d]]++]=d);if(e===0?(E=he=s,L=20):e===1?(E=lf,he=cf,L=257):(E=df,he=ff,L=0),S=0,d=0,c=h,I=r,p=u,_=0,F=-1,y=1<<u,C=y-1,e===1&&y>852||e===2&&y>592)return 1;for(;;){we=c-_,s[d]+1<L?(me=0,$=s[d]):s[d]>=L?(me=he[s[d]-L],$=E[s[d]-L]):(me=96,$=0),x=1<<c-_,v=1<<p,h=v;do v-=x,o[I+(S>>_)+v]=we<<24|me<<16|$|0;while(v!==0);for(x=1<<c-1;S&x;)x>>=1;if(x!==0?(S&=x-1,S+=x):S=0,d++,--M[c]===0){if(c===f)break;c=n[t+s[d]]}if(c>u&&(S&C)!==F){for(_===0&&(_=u),I+=h,p=c-_,b=1<<p;p+_<f&&(b-=M[p+_],!(b<=0));)p++,b<<=1;if(y+=1<<p,e===1&&y>852||e===2&&y>592)return 1;F=S&C,o[F]=u<<24|p<<16|I-r|0}}return S!==0&&(o[I+S]=c-_<<24|64<<16|0),a.bits=u,0};vs.exports=uf});var ra=ee((np,Ye)=>{"use strict";var Uo=co(),lt=fo(),hf=xs(),Tn=ks(),pf=0,Ks=1,Ys=2,{Z_FINISH:Is,Z_BLOCK:gf,Z_TREES:ai,Z_OK:Gt,Z_STREAM_END:mf,Z_NEED_DICT:bf,Z_STREAM_ERROR:We,Z_DATA_ERROR:Js,Z_MEM_ERROR:Lo,Z_BUF_ERROR:yf,Z_DEFLATED:Fs}=vt(),fi=16180,Ds=16181,Os=16182,Cs=16183,As=16184,Es=16185,Ps=16186,Us=16187,Ls=16188,Ms=16189,di=16190,mt=16191,Oo=16192,Ts=16193,Co=16194,Bs=16195,Rs=16196,js=16197,zs=16198,li=16199,ci=16200,Ns=16201,Vs=16202,Gs=16203,Hs=16204,Ws=16205,Ao=16206,$s=16207,Zs=16208,ue=16209,Mo=16210,Qs=16211,wf=852,Sf=592,_f=15,xf=_f,Xs=e=>(e>>>24&255)+(e>>>8&65280)+((e&65280)<<8)+((e&255)<<24);function vf(){this.strm=null,this.mode=0,this.last=!1,this.wrap=0,this.havedict=!1,this.flags=0,this.dmax=0,this.check=0,this.total=0,this.head=null,this.wbits=0,this.wsize=0,this.whave=0,this.wnext=0,this.window=null,this.hold=0,this.bits=0,this.length=0,this.offset=0,this.extra=0,this.lencode=null,this.distcode=null,this.lenbits=0,this.distbits=0,this.ncode=0,this.nlen=0,this.ndist=0,this.have=0,this.next=null,this.lens=new Uint16Array(320),this.work=new Uint16Array(288),this.lendyn=null,this.distdyn=null,this.sane=0,this.back=0,this.was=0}var Ht=e=>{if(!e)return 1;let n=e.state;return!n||n.strm!==e||n.mode<fi||n.mode>Qs?1:0},ea=e=>{if(Ht(e))return We;let n=e.state;return e.total_in=e.total_out=n.total=0,e.msg="",n.wrap&&(e.adler=n.wrap&1),n.mode=fi,n.last=0,n.havedict=0,n.flags=-1,n.dmax=32768,n.head=null,n.hold=0,n.bits=0,n.lencode=n.lendyn=new Int32Array(wf),n.distcode=n.distdyn=new Int32Array(Sf),n.sane=1,n.back=-1,Gt},ta=e=>{if(Ht(e))return We;let n=e.state;return n.wsize=0,n.whave=0,n.wnext=0,ea(e)},na=(e,n)=>{let t;if(Ht(e))return We;let i=e.state;return n<0?(t=0,n=-n):(t=(n>>4)+5,n<48&&(n&=15)),n&&(n<8||n>15)?We:(i.window!==null&&i.wbits!==n&&(i.window=null),i.wrap=t,i.wbits=n,ta(e))},ia=(e,n)=>{if(!e)return We;let t=new vf;e.state=t,t.strm=e,t.window=null,t.mode=fi;let i=na(e,n);return i!==Gt&&(e.state=null),i},kf=e=>ia(e,xf),qs=!0,Eo,Po,If=e=>{if(qs){Eo=new Int32Array(512),Po=new Int32Array(32);let n=0;for(;n<144;)e.lens[n++]=8;for(;n<256;)e.lens[n++]=9;for(;n<280;)e.lens[n++]=7;for(;n<288;)e.lens[n++]=8;for(Tn(Ks,e.lens,0,288,Eo,0,e.work,{bits:9}),n=0;n<32;)e.lens[n++]=5;Tn(Ys,e.lens,0,32,Po,0,e.work,{bits:5}),qs=!1}e.lencode=Eo,e.lenbits=9,e.distcode=Po,e.distbits=5},oa=(e,n,t,i)=>{let o,r=e.state;return r.window===null&&(r.wsize=1<<r.wbits,r.wnext=0,r.whave=0,r.window=new Uint8Array(r.wsize)),i>=r.wsize?(r.window.set(n.subarray(t-r.wsize,t),0),r.wnext=0,r.whave=r.wsize):(o=r.wsize-r.wnext,o>i&&(o=i),r.window.set(n.subarray(t-i,t-i+o),r.wnext),i-=o,i?(r.window.set(n.subarray(t-i,t),0),r.wnext=i,r.whave=r.wsize):(r.wnext+=o,r.wnext===r.wsize&&(r.wnext=0),r.whave<r.wsize&&(r.whave+=o))),0},Ff=(e,n)=>{let t,i,o,r,s,a,l,c,d,h,f,u,p,_,b=0,y,S,x,v,F,C,I,E,L=new Uint8Array(4),M,j,he=new Uint8Array([16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15]);if(Ht(e)||!e.output||!e.input&&e.avail_in!==0)return We;t=e.state,t.mode===mt&&(t.mode=Oo),s=e.next_out,o=e.output,l=e.avail_out,r=e.next_in,i=e.input,a=e.avail_in,c=t.hold,d=t.bits,h=a,f=l,E=Gt;e:for(;;)switch(t.mode){case fi:if(t.wrap===0){t.mode=Oo;break}for(;d<16;){if(a===0)break e;a--,c+=i[r++]<<d,d+=8}if(t.wrap&2&&c===35615){t.wbits===0&&(t.wbits=15),t.check=0,L[0]=c&255,L[1]=c>>>8&255,t.check=lt(t.check,L,2,0),c=0,d=0,t.mode=Ds;break}if(t.head&&(t.head.done=!1),!(t.wrap&1)||(((c&255)<<8)+(c>>8))%31){e.msg="incorrect header check",t.mode=ue;break}if((c&15)!==Fs){e.msg="unknown compression method",t.mode=ue;break}if(c>>>=4,d-=4,I=(c&15)+8,t.wbits===0&&(t.wbits=I),I>15||I>t.wbits){e.msg="invalid window size",t.mode=ue;break}t.dmax=1<<t.wbits,t.flags=0,e.adler=t.check=1,t.mode=c&512?Ms:mt,c=0,d=0;break;case Ds:for(;d<16;){if(a===0)break e;a--,c+=i[r++]<<d,d+=8}if(t.flags=c,(t.flags&255)!==Fs){e.msg="unknown compression method",t.mode=ue;break}if(t.flags&57344){e.msg="unknown header flags set",t.mode=ue;break}t.head&&(t.head.text=c>>8&1),t.flags&512&&t.wrap&4&&(L[0]=c&255,L[1]=c>>>8&255,t.check=lt(t.check,L,2,0)),c=0,d=0,t.mode=Os;case Os:for(;d<32;){if(a===0)break e;a--,c+=i[r++]<<d,d+=8}t.head&&(t.head.time=c),t.flags&512&&t.wrap&4&&(L[0]=c&255,L[1]=c>>>8&255,L[2]=c>>>16&255,L[3]=c>>>24&255,t.check=lt(t.check,L,4,0)),c=0,d=0,t.mode=Cs;case Cs:for(;d<16;){if(a===0)break e;a--,c+=i[r++]<<d,d+=8}t.head&&(t.head.xflags=c&255,t.head.os=c>>8),t.flags&512&&t.wrap&4&&(L[0]=c&255,L[1]=c>>>8&255,t.check=lt(t.check,L,2,0)),c=0,d=0,t.mode=As;case As:if(t.flags&1024){for(;d<16;){if(a===0)break e;a--,c+=i[r++]<<d,d+=8}t.length=c,t.head&&(t.head.extra_len=c),t.flags&512&&t.wrap&4&&(L[0]=c&255,L[1]=c>>>8&255,t.check=lt(t.check,L,2,0)),c=0,d=0}else t.head&&(t.head.extra=null);t.mode=Es;case Es:if(t.flags&1024&&(u=t.length,u>a&&(u=a),u&&(t.head&&(I=t.head.extra_len-t.length,t.head.extra||(t.head.extra=new Uint8Array(t.head.extra_len)),t.head.extra.set(i.subarray(r,r+u),I)),t.flags&512&&t.wrap&4&&(t.check=lt(t.check,i,u,r)),a-=u,r+=u,t.length-=u),t.length))break e;t.length=0,t.mode=Ps;case Ps:if(t.flags&2048){if(a===0)break e;u=0;do I=i[r+u++],t.head&&I&&t.length<65536&&(t.head.name+=String.fromCharCode(I));while(I&&u<a);if(t.flags&512&&t.wrap&4&&(t.check=lt(t.check,i,u,r)),a-=u,r+=u,I)break e}else t.head&&(t.head.name=null);t.length=0,t.mode=Us;case Us:if(t.flags&4096){if(a===0)break e;u=0;do I=i[r+u++],t.head&&I&&t.length<65536&&(t.head.comment+=String.fromCharCode(I));while(I&&u<a);if(t.flags&512&&t.wrap&4&&(t.check=lt(t.check,i,u,r)),a-=u,r+=u,I)break e}else t.head&&(t.head.comment=null);t.mode=Ls;case Ls:if(t.flags&512){for(;d<16;){if(a===0)break e;a--,c+=i[r++]<<d,d+=8}if(t.wrap&4&&c!==(t.check&65535)){e.msg="header crc mismatch",t.mode=ue;break}c=0,d=0}t.head&&(t.head.hcrc=t.flags>>9&1,t.head.done=!0),e.adler=t.check=0,t.mode=mt;break;case Ms:for(;d<32;){if(a===0)break e;a--,c+=i[r++]<<d,d+=8}e.adler=t.check=Xs(c),c=0,d=0,t.mode=di;case di:if(t.havedict===0)return e.next_out=s,e.avail_out=l,e.next_in=r,e.avail_in=a,t.hold=c,t.bits=d,bf;e.adler=t.check=1,t.mode=mt;case mt:if(n===gf||n===ai)break e;case Oo:if(t.last){c>>>=d&7,d-=d&7,t.mode=Ao;break}for(;d<3;){if(a===0)break e;a--,c+=i[r++]<<d,d+=8}switch(t.last=c&1,c>>>=1,d-=1,c&3){case 0:t.mode=Ts;break;case 1:if(If(t),t.mode=li,n===ai){c>>>=2,d-=2;break e}break;case 2:t.mode=Rs;break;case 3:e.msg="invalid block type",t.mode=ue}c>>>=2,d-=2;break;case Ts:for(c>>>=d&7,d-=d&7;d<32;){if(a===0)break e;a--,c+=i[r++]<<d,d+=8}if((c&65535)!==(c>>>16^65535)){e.msg="invalid stored block lengths",t.mode=ue;break}if(t.length=c&65535,c=0,d=0,t.mode=Co,n===ai)break e;case Co:t.mode=Bs;case Bs:if(u=t.length,u){if(u>a&&(u=a),u>l&&(u=l),u===0)break e;o.set(i.subarray(r,r+u),s),a-=u,r+=u,l-=u,s+=u,t.length-=u;break}t.mode=mt;break;case Rs:for(;d<14;){if(a===0)break e;a--,c+=i[r++]<<d,d+=8}if(t.nlen=(c&31)+257,c>>>=5,d-=5,t.ndist=(c&31)+1,c>>>=5,d-=5,t.ncode=(c&15)+4,c>>>=4,d-=4,t.nlen>286||t.ndist>30){e.msg="too many length or distance symbols",t.mode=ue;break}t.have=0,t.mode=js;case js:for(;t.have<t.ncode;){for(;d<3;){if(a===0)break e;a--,c+=i[r++]<<d,d+=8}t.lens[he[t.have++]]=c&7,c>>>=3,d-=3}for(;t.have<19;)t.lens[he[t.have++]]=0;if(t.lencode=t.lendyn,t.lenbits=7,M={bits:t.lenbits},E=Tn(pf,t.lens,0,19,t.lencode,0,t.work,M),t.lenbits=M.bits,E){e.msg="invalid code lengths set",t.mode=ue;break}t.have=0,t.mode=zs;case zs:for(;t.have<t.nlen+t.ndist;){for(;b=t.lencode[c&(1<<t.lenbits)-1],y=b>>>24,S=b>>>16&255,x=b&65535,!(y<=d);){if(a===0)break e;a--,c+=i[r++]<<d,d+=8}if(x<16)c>>>=y,d-=y,t.lens[t.have++]=x;else{if(x===16){for(j=y+2;d<j;){if(a===0)break e;a--,c+=i[r++]<<d,d+=8}if(c>>>=y,d-=y,t.have===0){e.msg="invalid bit length repeat",t.mode=ue;break}I=t.lens[t.have-1],u=3+(c&3),c>>>=2,d-=2}else if(x===17){for(j=y+3;d<j;){if(a===0)break e;a--,c+=i[r++]<<d,d+=8}c>>>=y,d-=y,I=0,u=3+(c&7),c>>>=3,d-=3}else{for(j=y+7;d<j;){if(a===0)break e;a--,c+=i[r++]<<d,d+=8}c>>>=y,d-=y,I=0,u=11+(c&127),c>>>=7,d-=7}if(t.have+u>t.nlen+t.ndist){e.msg="invalid bit length repeat",t.mode=ue;break}for(;u--;)t.lens[t.have++]=I}}if(t.mode===ue)break;if(t.lens[256]===0){e.msg="invalid code -- missing end-of-block",t.mode=ue;break}if(t.lenbits=9,M={bits:t.lenbits},E=Tn(Ks,t.lens,0,t.nlen,t.lencode,0,t.work,M),t.lenbits=M.bits,E){e.msg="invalid literal/lengths set",t.mode=ue;break}if(t.distbits=6,t.distcode=t.distdyn,M={bits:t.distbits},E=Tn(Ys,t.lens,t.nlen,t.ndist,t.distcode,0,t.work,M),t.distbits=M.bits,E){e.msg="invalid distances set",t.mode=ue;break}if(t.mode=li,n===ai)break e;case li:t.mode=ci;case ci:if(a>=6&&l>=258){e.next_out=s,e.avail_out=l,e.next_in=r,e.avail_in=a,t.hold=c,t.bits=d,hf(e,f),s=e.next_out,o=e.output,l=e.avail_out,r=e.next_in,i=e.input,a=e.avail_in,c=t.hold,d=t.bits,t.mode===mt&&(t.back=-1);break}for(t.back=0;b=t.lencode[c&(1<<t.lenbits)-1],y=b>>>24,S=b>>>16&255,x=b&65535,!(y<=d);){if(a===0)break e;a--,c+=i[r++]<<d,d+=8}if(S&&(S&240)===0){for(v=y,F=S,C=x;b=t.lencode[C+((c&(1<<v+F)-1)>>v)],y=b>>>24,S=b>>>16&255,x=b&65535,!(v+y<=d);){if(a===0)break e;a--,c+=i[r++]<<d,d+=8}c>>>=v,d-=v,t.back+=v}if(c>>>=y,d-=y,t.back+=y,t.length=x,S===0){t.mode=Ws;break}if(S&32){t.back=-1,t.mode=mt;break}if(S&64){e.msg="invalid literal/length code",t.mode=ue;break}t.extra=S&15,t.mode=Ns;case Ns:if(t.extra){for(j=t.extra;d<j;){if(a===0)break e;a--,c+=i[r++]<<d,d+=8}t.length+=c&(1<<t.extra)-1,c>>>=t.extra,d-=t.extra,t.back+=t.extra}t.was=t.length,t.mode=Vs;case Vs:for(;b=t.distcode[c&(1<<t.distbits)-1],y=b>>>24,S=b>>>16&255,x=b&65535,!(y<=d);){if(a===0)break e;a--,c+=i[r++]<<d,d+=8}if((S&240)===0){for(v=y,F=S,C=x;b=t.distcode[C+((c&(1<<v+F)-1)>>v)],y=b>>>24,S=b>>>16&255,x=b&65535,!(v+y<=d);){if(a===0)break e;a--,c+=i[r++]<<d,d+=8}c>>>=v,d-=v,t.back+=v}if(c>>>=y,d-=y,t.back+=y,S&64){e.msg="invalid distance code",t.mode=ue;break}t.offset=x,t.extra=S&15,t.mode=Gs;case Gs:if(t.extra){for(j=t.extra;d<j;){if(a===0)break e;a--,c+=i[r++]<<d,d+=8}t.offset+=c&(1<<t.extra)-1,c>>>=t.extra,d-=t.extra,t.back+=t.extra}if(t.offset>t.dmax){e.msg="invalid distance too far back",t.mode=ue;break}t.mode=Hs;case Hs:if(l===0)break e;if(u=f-l,t.offset>u){if(u=t.offset-u,u>t.whave&&t.sane){e.msg="invalid distance too far back",t.mode=ue;break}u>t.wnext?(u-=t.wnext,p=t.wsize-u):p=t.wnext-u,u>t.length&&(u=t.length),_=t.window}else _=o,p=s-t.offset,u=t.length;u>l&&(u=l),l-=u,t.length-=u;do o[s++]=_[p++];while(--u);t.length===0&&(t.mode=ci);break;case Ws:if(l===0)break e;o[s++]=t.length,l--,t.mode=ci;break;case Ao:if(t.wrap){for(;d<32;){if(a===0)break e;a--,c|=i[r++]<<d,d+=8}if(f-=l,e.total_out+=f,t.total+=f,t.wrap&4&&f&&(e.adler=t.check=t.flags?lt(t.check,o,f,s-f):Uo(t.check,o,f,s-f)),f=l,t.wrap&4&&(t.flags?c:Xs(c))!==t.check){e.msg="incorrect data check",t.mode=ue;break}c=0,d=0}t.mode=$s;case $s:if(t.wrap&&t.flags){for(;d<32;){if(a===0)break e;a--,c+=i[r++]<<d,d+=8}if(t.wrap&4&&c!==(t.total&4294967295)){e.msg="incorrect length check",t.mode=ue;break}c=0,d=0}t.mode=Zs;case Zs:E=mf;break e;case ue:E=Js;break e;case Mo:return Lo;case Qs:default:return We}return e.next_out=s,e.avail_out=l,e.next_in=r,e.avail_in=a,t.hold=c,t.bits=d,(t.wsize||f!==e.avail_out&&t.mode<ue&&(t.mode<Ao||n!==Is))&&oa(e,e.output,e.next_out,f-e.avail_out)?(t.mode=Mo,Lo):(h-=e.avail_in,f-=e.avail_out,e.total_in+=h,e.total_out+=f,t.total+=f,t.wrap&4&&f&&(e.adler=t.check=t.flags?lt(t.check,o,f,e.next_out-f):Uo(t.check,o,f,e.next_out-f)),e.data_type=t.bits+(t.last?64:0)+(t.mode===mt?128:0)+(t.mode===li||t.mode===Co?256:0),(h===0&&f===0||n===Is)&&E===Gt&&(E=yf),E)},Df=e=>{if(Ht(e))return We;let n=e.state;return n.window&&(n.window=null),e.state=null,Gt},Of=(e,n)=>{if(Ht(e))return We;let t=e.state;return(t.wrap&2)===0?We:(t.head=n,n.done=!1,Gt)},Cf=(e,n)=>{let t=n.length,i,o,r;return Ht(e)||(i=e.state,i.wrap!==0&&i.mode!==di)?We:i.mode===di&&(o=1,o=Uo(o,n,t,0),o!==i.check)?Js:(r=oa(e,n,t,t),r?(i.mode=Mo,Lo):(i.havedict=1,Gt))};Ye.exports.inflateReset=ta;Ye.exports.inflateReset2=na;Ye.exports.inflateResetKeep=ea;Ye.exports.inflateInit=kf;Ye.exports.inflateInit2=ia;Ye.exports.inflate=Ff;Ye.exports.inflateEnd=Df;Ye.exports.inflateGetHeader=Of;Ye.exports.inflateSetDictionary=Cf;Ye.exports.inflateInfo="pako inflate (from Nodeca project)"});var aa=ee((ip,sa)=>{"use strict";function Af(){this.text=0,this.time=0,this.xflags=0,this.os=0,this.extra=null,this.extra_len=0,this.name="",this.comment="",this.hcrc=0,this.done=!1}sa.exports=Af});var fa=ee((op,cn)=>{"use strict";var bt=ra(),ca=vo(),Ro=ko(),jo=ni(),Ef=Io(),Pf=aa(),da=Object.prototype.toString,{Z_NO_FLUSH:Uf,Z_FINISH:Lf,Z_OK:Bn,Z_STREAM_END:To,Z_NEED_DICT:Bo,Z_STREAM_ERROR:Mf,Z_DATA_ERROR:la,Z_MEM_ERROR:Tf}=vt();function Rn(e){this.options=ca.assign({chunkSize:1024*64,windowBits:15,to:""},e||{});let n=this.options;n.raw&&n.windowBits>=0&&n.windowBits<16&&(n.windowBits=-n.windowBits,n.windowBits===0&&(n.windowBits=-15)),n.windowBits>=0&&n.windowBits<16&&!(e&&e.windowBits)&&(n.windowBits+=32),n.windowBits>15&&n.windowBits<48&&(n.windowBits&15)===0&&(n.windowBits|=15),this.err=0,this.msg="",this.ended=!1,this.chunks=[],this.strm=new Ef,this.strm.avail_out=0;let t=bt.inflateInit2(this.strm,n.windowBits);if(t!==Bn)throw new Error(jo[t]);if(this.header=new Pf,bt.inflateGetHeader(this.strm,this.header),n.dictionary&&(typeof n.dictionary=="string"?n.dictionary=Ro.string2buf(n.dictionary):da.call(n.dictionary)==="[object ArrayBuffer]"&&(n.dictionary=new Uint8Array(n.dictionary)),n.raw&&(t=bt.inflateSetDictionary(this.strm,n.dictionary),t!==Bn)))throw new Error(jo[t])}Rn.prototype.push=function(e,n){let t=this.strm,i=this.options.chunkSize,o=this.options.dictionary,r,s,a;if(this.ended)return!1;for(n===~~n?s=n:s=n===!0?Lf:Uf,da.call(e)==="[object ArrayBuffer]"?t.input=new Uint8Array(e):t.input=e,t.next_in=0,t.avail_in=t.input.length;;){for(t.avail_out===0&&(t.output=new Uint8Array(i),t.next_out=0,t.avail_out=i),r=bt.inflate(t,s),r===Bo&&o&&(r=bt.inflateSetDictionary(t,o),r===Bn?r=bt.inflate(t,s):r===la&&(r=Bo));t.avail_in>0&&r===To&&t.state.wrap>0&&e[t.next_in]!==0;)bt.inflateReset(t),r=bt.inflate(t,s);switch(r){case Mf:case la:case Bo:case Tf:return this.onEnd(r),this.ended=!0,!1}if(a=t.avail_out,t.next_out&&(t.avail_out===0||r===To))if(this.options.to==="string"){let l=Ro.utf8border(t.output,t.next_out),c=t.next_out-l,d=Ro.buf2string(t.output,l);t.next_out=c,t.avail_out=i-c,c&&t.output.set(t.output.subarray(l,l+c),0),this.onData(d)}else this.onData(t.output.length===t.next_out?t.output:t.output.subarray(0,t.next_out));if(!(r===Bn&&a===0)){if(r===To)return r=bt.inflateEnd(this.strm),this.onEnd(r),this.ended=!0,!0;if(t.avail_in===0)break}}return!0};Rn.prototype.onData=function(e){this.chunks.push(e)};Rn.prototype.onEnd=function(e){e===Bn&&(this.options.to==="string"?this.result=this.chunks.join(""):this.result=ca.flattenChunks(this.chunks)),this.chunks=[],this.err=e,this.msg=this.strm.msg};function zo(e,n){let t=new Rn(n);if(t.push(e),t.err)throw t.msg||jo[t.err];return t.result}function Bf(e,n){return n=n||{},n.raw=!0,zo(e,n)}cn.exports.Inflate=Rn;cn.exports.inflate=zo;cn.exports.inflateRaw=Bf;cn.exports.ungzip=zo;cn.exports.constants=vt()});var No=ee((rp,ct)=>{"use strict";var{Deflate:Rf,deflate:jf,deflateRaw:zf,gzip:Nf}=Ss(),{Inflate:Vf,inflate:Gf,inflateRaw:Hf,ungzip:Wf}=fa(),$f=vt();ct.exports.Deflate=Rf;ct.exports.deflate=jf;ct.exports.deflateRaw=zf;ct.exports.gzip=Nf;ct.exports.Inflate=Vf;ct.exports.inflate=Gf;ct.exports.inflateRaw=Hf;ct.exports.ungzip=Wf;ct.exports.constants=$f});var ha=ee(Go=>{"use strict";Object.defineProperty(Go,"__esModule",{value:!0});Go.decodeJpeg=Qf;var jn=new Int32Array([0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,12,19,26,33,40,48,41,34,27,20,13,6,7,14,21,28,35,42,49,56,57,50,43,36,29,22,15,23,30,37,44,51,58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63]),ui=4017,hi=799,pi=3406,gi=2276,mi=1567,bi=3784,dn=5793,yi=2896,Zf=100,ua=64*1024*1024,Vo=0;function fn(e){let n=Vo+e;if(n>ua){let t=Math.ceil((n-ua)/1024/1024);throw new Error(`Max memory limit exceeded by at least ${t}MB`)}Vo=n}function Xf(e,n){let t=16;for(;t>0&&!e[t-1];)t--;let i=[{children:[],index:0}],o=0,r=i[0];for(let s=0;s<t;s++){for(let a=0;a<e[s];a++){for(r=i.pop(),r.children[r.index]=n[o];r.index>0;){if(i.length===0)throw new Error("Could not recreate Huffman Table");r=i.pop()}for(r.index++,i.push(r);i.length<=s;){let l={children:[],index:0};i.push(l),r.children[r.index]=l.children,r=l}o++}if(s+1<t){let a={children:[],index:0};i.push(a),r.children[r.index]=a.children,r=a}}return i[0].children}function qf(e,n,t,i,o,r,s,a,l){let c=t.mcusPerLine,d=t.progressive,h=n,f=0,u=0;function p(){if(u>0)return u--,f>>u&1;if(f=e[n++],f==255){let z=e[n++];if(z)throw new Error(`unexpected marker: ${(f<<8|z).toString(16)}`)}return u=7,f>>>7}function _(z){let T=z;for(;;){if(T=T[p()],typeof T=="number")return T;if(T===void 0)throw new Error("invalid huffman sequence")}}function b(z){let T=0;for(;z>0;)T=T<<1|p(),z--;return T}function y(z){let T=b(z);return T>=1<<z-1?T:T+(-1<<z)+1}function S(z,T){let H=_(z.huffmanTableDC),de=H===0?0:y(H);T[0]=z.pred+=de;let ie=1;for(;ie<64;){let ge=_(z.huffmanTableAC),xe=ge&15,nt=ge>>4;if(xe===0){if(nt<15)break;ie+=16;continue}ie+=nt;let Rt=jn[ie];T[Rt]=y(xe),ie++}}function x(z,T){let H=_(z.huffmanTableDC),de=H===0?0:y(H)<<l;T[0]=z.pred+=de}function v(z,T){T[0]|=p()<<l}let F=0;function C(z,T){if(F>0){F--;return}let H=r,de=s;for(;H<=de;){let ie=_(z.huffmanTableAC),ge=ie&15,xe=ie>>4;if(ge===0){if(xe<15){F=b(xe)+(1<<xe)-1;break}H+=16;continue}H+=xe;let nt=jn[H];T[nt]=y(ge)*(1<<l),H++}}let I=0,E=0;function L(z,T){let H=r,de=s,ie=0;for(;H<=de;){let ge=jn[H],xe=T[ge]<0?-1:1;switch(I){case 0:let nt=_(z.huffmanTableAC),Rt=nt&15;if(ie=nt>>4,Rt===0)ie<15?(F=b(ie)+(1<<ie),I=4):(ie=16,I=1);else{if(Rt!==1)throw new Error("invalid ACn encoding");E=y(Rt),I=ie?2:3}continue;case 1:case 2:T[ge]?T[ge]+=(p()<<l)*xe:(ie--,ie===0&&(I=I==2?3:0));break;case 3:T[ge]?T[ge]+=(p()<<l)*xe:(T[ge]=E<<l,I=0);break;case 4:T[ge]&&(T[ge]+=(p()<<l)*xe);break}H++}I===4&&(F--,F===0&&(I=0))}function M(z,T,H,de,ie){let ge=H/c|0,xe=H%c,nt=ge*z.v+de,Rt=xe*z.h+ie;z.blocks[nt]!==void 0&&T(z,z.blocks[nt][Rt])}function j(z,T,H){let de=H/z.blocksPerLine|0,ie=H%z.blocksPerLine;z.blocks[de]!==void 0&&T(z,z.blocks[de][ie])}let he=i.length,we,me;d?r===0?me=a===0?x:v:me=a===0?C:L:me=S;let $=0,ne;he==1?ne=i[0].blocksPerLine*i[0].blocksPerColumn:ne=c*t.mcusPerColumn,o||(o=ne);let pe,Le,tt;for(;$<ne;){for(let z=0;z<he;z++)i[z].pred=0;if(F=0,he==1){we=i[0];for(let z=0;z<o;z++)j(we,me,$),$++}else for(let z=0;z<o;z++){for(let T=0;T<he;T++){we=i[T],pe=we.h,Le=we.v;for(let H=0;H<Le;H++)for(let de=0;de<pe;de++)M(we,me,$,H,de)}if($++,$===ne)break}if($===ne)do{if(e[n]===255&&e[n+1]!==0)break;n+=1}while(n<e.length-2);if(u=0,tt=e[n]<<8|e[n+1],tt<65280)throw new Error("marker was not found");if(tt>=65488&&tt<=65495)n+=2;else break}return n-h}function Kf(e){let n=[],t=e.blocksPerLine,i=e.blocksPerColumn,o=t<<3,r=new Int32Array(64),s=new Uint8Array(64);function a(l,c,d){let h=e.quantizationTable,f=d;for(let u=0;u<64;u++)f[u]=l[u]*h[u];for(let u=0;u<8;++u){let p=8*u;if(f[1+p]==0&&f[2+p]==0&&f[3+p]==0&&f[4+p]==0&&f[5+p]==0&&f[6+p]==0&&f[7+p]==0){let E=dn*f[0+p]+512>>10;f[0+p]=E,f[1+p]=E,f[2+p]=E,f[3+p]=E,f[4+p]=E,f[5+p]=E,f[6+p]=E,f[7+p]=E;continue}let _=dn*f[0+p]+128>>8,b=dn*f[4+p]+128>>8,y=f[2+p],S=f[6+p],x=yi*(f[1+p]-f[7+p])+128>>8,v=yi*(f[1+p]+f[7+p])+128>>8,F=f[3+p]<<4,C=f[5+p]<<4,I=_-b+1>>1;_=_+b+1>>1,b=I,I=y*bi+S*mi+128>>8,y=y*mi-S*bi+128>>8,S=I,I=x-C+1>>1,x=x+C+1>>1,C=I,I=v+F+1>>1,F=v-F+1>>1,v=I,I=_-S+1>>1,_=_+S+1>>1,S=I,I=b-y+1>>1,b=b+y+1>>1,y=I,I=x*gi+v*pi+2048>>12,x=x*pi-v*gi+2048>>12,v=I,I=F*hi+C*ui+2048>>12,F=F*ui-C*hi+2048>>12,C=I,f[0+p]=_+v,f[7+p]=_-v,f[1+p]=b+C,f[6+p]=b-C,f[2+p]=y+F,f[5+p]=y-F,f[3+p]=S+x,f[4+p]=S-x}for(let u=0;u<8;++u){let p=u;if(f[8+p]==0&&f[16+p]==0&&f[24+p]==0&&f[32+p]==0&&f[40+p]==0&&f[48+p]==0&&f[56+p]==0){let E=dn*d[u+0]+8192>>14;f[0+p]=E,f[8+p]=E,f[16+p]=E,f[24+p]=E,f[32+p]=E,f[40+p]=E,f[48+p]=E,f[56+p]=E;continue}let _=dn*f[0+p]+2048>>12,b=dn*f[32+p]+2048>>12,y=f[16+p],S=f[48+p],x=yi*(f[8+p]-f[56+p])+2048>>12,v=yi*(f[8+p]+f[56+p])+2048>>12,F=f[24+p],C=f[40+p],I=_-b+1>>1;_=_+b+1>>1,b=I,I=y*bi+S*mi+2048>>12,y=y*mi-S*bi+2048>>12,S=I,I=x-C+1>>1,x=x+C+1>>1,C=I,I=v+F+1>>1,F=v-F+1>>1,v=I,I=_-S+1>>1,_=_+S+1>>1,S=I,I=b-y+1>>1,b=b+y+1>>1,y=I,I=x*gi+v*pi+2048>>12,x=x*pi-v*gi+2048>>12,v=I,I=F*hi+C*ui+2048>>12,F=F*ui-C*hi+2048>>12,C=I,f[0+p]=_+v,f[56+p]=_-v,f[8+p]=b+C,f[48+p]=b-C,f[16+p]=y+F,f[40+p]=y-F,f[24+p]=S+x,f[32+p]=S-x}for(let u=0;u<64;++u){let p=128+(f[u]+8>>4);c[u]=p<0?0:p>255?255:p}}fn(o*i*8);for(let l=0;l<i;l++){let c=l<<3;for(let d=0;d<8;d++)n.push(new Uint8Array(o));for(let d=0;d<t;d++){a(e.blocks[l][d],s,r);let h=0,f=d<<3;for(let u=0;u<8;u++){let p=n[c+u];for(let _=0;_<8;_++)p[f+_]=s[h++]}}}return n}function yt(e){return e<0?0:e>255?255:e}function Yf(e){let n={width:0,height:0,adobe:void 0,components:[],exifBuffer:void 0,jfif:void 0},t=Zf*1e3*1e3,i=0;function o(){let y=e[i]<<8|e[i+1];return i+=2,y}function r(){let y=o(),S=e.subarray(i,i+y-2);return i+=S.length,S}function s(y){let S=0,x=0;for(let C in y.components)if(y.components.hasOwnProperty(C)){let I=y.components[C];S<I.h&&(S=I.h),x<I.v&&(x=I.v)}let v=Math.ceil(y.samplesPerLine/8/S),F=Math.ceil(y.scanLines/8/x);for(let C in y.components)if(y.components.hasOwnProperty(C)){let I=y.components[C],E=Math.ceil(Math.ceil(y.samplesPerLine/8)*I.h/S),L=Math.ceil(Math.ceil(y.scanLines/8)*I.v/x),M=v*I.h,j=F*I.v,he=j*M,we=[];fn(he*256);for(let me=0;me<j;me++){let $=[];for(let ne=0;ne<M;ne++)$.push(new Int32Array(64));we.push($)}I.blocksPerLine=E,I.blocksPerColumn=L,I.blocks=we}y.maxH=S,y.maxV=x,y.mcusPerLine=v,y.mcusPerColumn=F}let a=null,l=null,c,d=0,h=[],f=[],u=[],p=[],_=o(),b=-1;if(_!=65496)throw new Error("SOI not found");for(_=o();_!=65497;){switch(_){case 65280:break;case 65504:case 65505:case 65506:case 65507:case 65508:case 65509:case 65510:case 65511:case 65512:case 65513:case 65514:case 65515:case 65516:case 65517:case 65518:case 65519:case 65534:{let y=r();_===65504&&y[0]===74&&y[1]===70&&y[2]===73&&y[3]===70&&y[4]===0&&(a={version:{major:y[5],minor:y[6]},densityUnits:y[7],xDensity:y[8]<<8|y[9],yDensity:y[10]<<8|y[11],thumbWidth:y[12],thumbHeight:y[13],thumbData:y.subarray(14,14+3*y[12]*y[13])}),_===65505&&y[0]===69&&y[1]===120&&y[2]===105&&y[3]===102&&y[4]===0&&(n.exifBuffer=y.subarray(5,y.length)),_===65518&&y[0]===65&&y[1]===100&&y[2]===111&&y[3]===98&&y[4]===101&&y[5]===0&&(l={version:y[6],flags0:y[7]<<8|y[8],flags1:y[9]<<8|y[10],transformCode:y[11]});break}case 65499:{let S=o()+i-2;for(;i<S;){let x=e[i++];fn(256);let v=new Int32Array(64);if(x>>4===0)for(let F=0;F<64;F++){let C=jn[F];v[C]=e[i++]}else if(x>>4===1)for(let F=0;F<64;F++){let C=jn[F];v[C]=o()}else throw new Error("DQT: invalid table spec");h[x&15]=v}break}case 65472:case 65473:case 65474:{o(),c={extended:_===65473,progressive:_===65474,precision:e[i++],scanLines:o(),samplesPerLine:o(),components:{},componentsOrder:[],maxH:0,maxV:0,mcusPerLine:0,mcusPerColumn:0};let y=c.scanLines*c.samplesPerLine;if(y>t){let x=Math.ceil((y-t)/1e6);throw new Error(`maxResolutionInMP limit exceeded by ${x}MP`)}let S=e[i++];for(let x=0;x<S;x++){let v=e[i],F=e[i+1]>>4,C=e[i+1]&15,I=e[i+2];c.componentsOrder.push(v),c.components[v]={h:F,v:C,quantizationIdx:I,blocksPerColumn:0,blocksPerLine:0,blocks:[],pred:0},i+=3}s(c),f.push(c);break}case 65476:{let y=o();for(let S=2;S<y;){let x=e[i++],v=new Uint8Array(16),F=0;for(let L=0;L<16;L++,i++)F+=v[L]=e[i];fn(16+F);let C=new Uint8Array(F);for(let L=0;L<F;L++,i++)C[L]=e[i];S+=17+F;let I=x&15,E=x>>4===0?p:u;E[I]=Xf(v,C)}break}case 65501:o(),d=o();break;case 65500:o(),o();break;case 65498:{o();let y=e[i++],S=[];for(let I=0;I<y;I++){let E=c.components[e[i++]],L=e[i++];E.huffmanTableDC=p[L>>4],E.huffmanTableAC=u[L&15],S.push(E)}let x=e[i++],v=e[i++],F=e[i++],C=qf(e,i,c,S,d,x,v,F>>4,F&15);i+=C;break}case 65535:e[i]!==255&&i--;break;default:{if(e[i-3]==255&&e[i-2]>=192&&e[i-2]<=254){i-=3;break}else if(_===224||_==225){if(b!==-1)throw new Error(`first unknown JPEG marker at offset ${b.toString(16)}, second unknown JPEG marker ${_.toString(16)} at offset ${(i-1).toString(16)}`);b=i-1;let y=o();if(e[i+y-2]===255){i+=y-2;break}}throw new Error("unknown JPEG marker "+_.toString(16))}}_=o()}if(f.length!=1)throw new Error("only single frame JPEGs supported");for(let y=0;y<f.length;y++){let S=f[y].components;for(let x in S)S[x].quantizationTable=h[S[x].quantizationIdx],delete S[x].quantizationIdx}n.width=c.samplesPerLine,n.height=c.scanLines,n.jfif=a,n.adobe=l,n.components=[];for(let y=0;y<c.componentsOrder.length;y++){let S=c.components[c.componentsOrder[y]];n.components.push({lines:Kf(S),scaleX:S.h/c.maxH,scaleY:S.v/c.maxV})}return n}function Jf(e){let n=0,t=!1,i=e.width,o=e.height,r=i*o*e.components.length;fn(r);let s=new Uint8Array(r);switch(e.components.length){case 1:{let a=e.components[0];for(let l=0;l<o;l++){let c=a.lines[0|l*a.scaleY];for(let d=0;d<i;d++){let h=c[0|d*a.scaleX];s[n++]=h}}break}case 2:{let a=e.components[0],l=e.components[1];for(let c=0;c<o;c++){let d=a.lines[0|c*a.scaleY],h=l.lines[0|c*l.scaleY];for(let f=0;f<i;f++){let u=d[0|f*a.scaleX];s[n++]=u;let p=h[0|f*l.scaleX];s[n++]=p}}break}case 3:{t=!0,e.adobe&&e.adobe.transformCode&&(t=!0);let a=e.components[0],l=e.components[1],c=e.components[2];for(let d=0;d<o;d++){let h=a.lines[0|d*a.scaleY],f=l.lines[0|d*l.scaleY],u=c.lines[0|d*c.scaleY];for(let p=0;p<i;p++){let _,b,y,S,x,v;t?(_=h[0|p*a.scaleX],b=f[0|p*l.scaleX],y=u[0|p*c.scaleX],S=yt(_+1.402*(y-128)),x=yt(_-.3441363*(b-128)-.71413636*(y-128)),v=yt(_+1.772*(b-128))):(S=h[0|p*a.scaleX],x=f[0|p*l.scaleX],v=u[0|p*c.scaleX]),s[n++]=S,s[n++]=x,s[n++]=v}}break}case 4:{if(!e.adobe)throw new Error("Unsupported color mode (4 components)");t=!1,e.adobe&&e.adobe.transformCode&&(t=!0);let a=e.components[0],l=e.components[1],c=e.components[2],d=e.components[3];for(let h=0;h<o;h++){let f=a.lines[0|h*a.scaleY],u=l.lines[0|h*l.scaleY],p=c.lines[0|h*c.scaleY],_=d.lines[0|h*d.scaleY];for(let b=0;b<i;b++){let y,S,x,v,F,C,I;t?(y=f[0|b*a.scaleX],S=u[0|b*l.scaleX],x=p[0|b*c.scaleX],v=_[0|b*d.scaleX],F=255-yt(y+1.402*(x-128)),C=255-yt(y-.3441363*(S-128)-.71413636*(x-128)),I=255-yt(y+1.772*(S-128))):(F=f[0|b*a.scaleX],C=u[0|b*l.scaleX],I=p[0|b*c.scaleX],v=_[0|b*d.scaleX]),s[n++]=255-F,s[n++]=255-C,s[n++]=255-I,s[n++]=255-v}}break}default:throw new Error("Unsupported color mode")}return s}function Qf(e,n){if(Vo=0,e.length===0)throw new Error("Empty jpeg buffer");let t=Yf(e);fn(t.width*t.height*4);let i=Jf(t),o=n(t.width,t.height),r=o.width,s=o.height,a=o.data,l=0,c=0;switch(t.components.length){case 1:for(let d=0;d<s;d++)for(let h=0;h<r;h++){let f=i[l++];a[c++]=f,a[c++]=f,a[c++]=f,a[c++]=255}break;case 2:for(let d=0;d<s;d++)for(let h=0;h<r;h++){let f=i[l++],u=i[l++];a[c++]=f,a[c++]=f,a[c++]=f,a[c++]=u}break;case 3:for(let d=0;d<s;d++)for(let h=0;h<r;h++){let f=i[l++],u=i[l++],p=i[l++];a[c++]=f,a[c++]=u,a[c++]=p,a[c++]=255}break;case 4:for(let d=0;d<s;d++)for(let h=0;h<r;h++){let f=i[l++],u=i[l++],p=i[l++],_=i[l++],b=255-yt(f*(1-_/255)+_),y=255-yt(u*(1-_/255)+_),S=255-yt(p*(1-_/255)+_);a[c++]=b,a[c++]=y,a[c++]=S,a[c++]=255}break;default:throw new Error("Unsupported color mode")}return o}});var At=ee(V=>{"use strict";Object.defineProperty(V,"__esModule",{value:!0});V.createImageData=V.createCanvas=V.MaskParams=V.LayerMaskFlags=V.ColorSpace=V.largeAdditionalInfoKeys=V.layerColors=V.toBlendMode=V.fromBlendMode=V.RAW_IMAGE_DATA=V.MOCK_HANDLERS=void 0;V.revMap=ba;V.createEnum=nu;V.offsetForChannel=iu;V.clamp=ou;V.hasAlpha=ru;V.resetImageData=su;V.imageDataToCanvas=au;V.decodeBitmap=lu;V.writeDataRaw=cu;V.writeDataRLE=du;V.writeDataZipWithoutPrediction=fu;V.createCanvasFromData=uu;V.initializeCanvas=gu;var eu=No(),tu=ha();V.MOCK_HANDLERS=!1;V.RAW_IMAGE_DATA=!1;V.fromBlendMode={};V.toBlendMode={pass:"pass through",norm:"normal",diss:"dissolve",dark:"darken","mul ":"multiply",idiv:"color burn",lbrn:"linear burn",dkCl:"darker color",lite:"lighten",scrn:"screen","div ":"color dodge",lddg:"linear dodge",lgCl:"lighter color",over:"overlay",sLit:"soft light",hLit:"hard light",vLit:"vivid light",lLit:"linear light",pLit:"pin light",hMix:"hard mix",diff:"difference",smud:"exclusion",fsub:"subtract",fdiv:"divide","hue ":"hue","sat ":"saturation",colr:"color","lum ":"luminosity"};Object.keys(V.toBlendMode).forEach(e=>V.fromBlendMode[V.toBlendMode[e]]=e);V.layerColors=["none","red","orange","yellow","green","blue","violet","gray"];V.largeAdditionalInfoKeys=["LMsk","Lr16","Lr32","Layr","Mt16","Mt32","Mtrn","Alph","FMsk","lnk2","FEid","FXid","PxSD","cinf"];function ba(e){let n={};return Object.keys(e).forEach(t=>n[e[t]]=t),n}function nu(e,n,t){let i=ba(t);return{decode:s=>{let a=s.split(".")[1];if(a&&!i[a]){if(Object.prototype.hasOwnProperty.call(t,a))return a;let l=a.replace(/([A-Z])/g," $1").toLowerCase();if(Object.prototype.hasOwnProperty.call(t,l))return l;throw new Error(`Unrecognized value for enum: \'${s}\'`)}return i[a]||n},encode:s=>{if(s&&!t[s])throw new Error(`Invalid value for enum: \'${s}\'`);return`${e}.${s?t[s]:t[n]}`}}}var pa;(function(e){e[e.RGB=0]="RGB",e[e.HSB=1]="HSB",e[e.CMYK=2]="CMYK",e[e.Lab=7]="Lab",e[e.Grayscale=8]="Grayscale"})(pa||(V.ColorSpace=pa={}));var ga;(function(e){e[e.PositionRelativeToLayer=1]="PositionRelativeToLayer",e[e.LayerMaskDisabled=2]="LayerMaskDisabled",e[e.InvertLayerMaskWhenBlending=4]="InvertLayerMaskWhenBlending",e[e.LayerMaskFromRenderingOtherData=8]="LayerMaskFromRenderingOtherData",e[e.MaskHasParametersAppliedToIt=16]="MaskHasParametersAppliedToIt"})(ga||(V.LayerMaskFlags=ga={}));var ma;(function(e){e[e.UserMaskDensity=1]="UserMaskDensity",e[e.UserMaskFeather=2]="UserMaskFeather",e[e.VectorMaskDensity=4]="VectorMaskDensity",e[e.VectorMaskFeather=8]="VectorMaskFeather"})(ma||(V.MaskParams=ma={}));function iu(e,n){switch(e){case 0:return 0;case 1:return 1;case 2:return 2;case 3:return n?3:e+1;case-1:return n?4:3;default:return e+1}}function ou(e,n,t){return e<n?n:e>t?t:e}function ru(e){let n=e.width*e.height*4;for(let t=3;t<n;t+=4)if(e.data[t]!==255)return!0;return!1}function su({data:e}){let n=e instanceof Float32Array?1:e instanceof Uint16Array?65535:255;for(let t=0,i=e.length|0;t<i;t=t+4|0)e[t+0]=0,e[t+1]=0,e[t+2]=0,e[t+3]=n}function au(e){let n=(0,V.createCanvas)(e.width,e.height),t;if(e.data instanceof Uint8ClampedArray)t=e;else{t=(0,V.createImageData)(e.width,e.height);let i=e.data,o=t.data;if(i instanceof Float32Array)for(let r=0,s=i.length;r<s;r+=4)o[r+0]=Math.round(Math.pow(i[r+0],1/2.2)*255),o[r+1]=Math.round(Math.pow(i[r+1],1/2.2)*255),o[r+2]=Math.round(Math.pow(i[r+2],1/2.2)*255),o[r+3]=Math.round(i[r+3]*255);else{let r=i instanceof Uint16Array?8:0;for(let s=0,a=i.length;s<a;s++)o[s]=i[s]>>>r}}return n.getContext("2d").putImageData(t,0,0),n}function lu(e,n,t,i){if(!(e instanceof Uint8Array||e instanceof Uint8ClampedArray))throw new Error("Invalid bit depth");for(let o=0,r=0,s=0;o<i;o++)for(let a=0;a<t;){let l=e[s++];for(let c=0;c<8&&a<t;c++,a++,r+=4){let d=l&128?0:255;l=l<<1,n[r+0]=d,n[r+1]=d,n[r+2]=d,n[r+3]=255}}}function cu(e,n,t,i){if(!t||!i)return;let o=new Uint8Array(t*i);for(let r=0;r<o.length;r++)o[r]=e.data[r*4+n];return o}function du(e,{data:n,width:t,height:i},o,r){if(!t||!i)return;let s=4*t|0,a=0,l=o.length*(r?4:2)*i|0;for(let c of o)for(let d=0,h=c|0;d<i;d++){let f=d*s|0,u=f+s|0,p=u+c-4|0,_=p-4|0,b=l;for(h=f+c|0;h<u;h=h+4|0)if(h<_){let S=n[h];h=h+4|0;let x=n[h];h=h+4|0;let v=n[h];if(S===x&&S===v){let F=3;for(;F<128&&h<p&&n[h+4|0]===S;)F=F+1|0,h=h+4|0;e[l++]=1-F,e[l++]=S}else{let F=l,C=!0,I=1;for(e[l++]=0,e[l++]=S;h<p&&I<128;)if(h=h+4|0,S=x,x=v,v=n[h],S===x&&S===v){h=h-12|0,C=!1;break}else I++,e[l++]=S;C&&(I<127?(e[l++]=x,e[l++]=v,I+=2):I<128?(e[l++]=x,I++,h=h-4|0):h=h-8|0),e[F]=I-1}}else h===p?(e[l++]=0,e[l++]=n[h]):(e[l++]=1,e[l++]=n[h],h=h+4|0,e[l++]=n[h]);let y=l-b;r&&(e[a++]=y>>24&255,e[a++]=y>>16&255),e[a++]=y>>8&255,e[a++]=y&255}return e.slice(0,l)}function fu({data:e,width:n,height:t},i){let o=n*t,r=new Uint8Array(o),s=[],a=0;for(let l of i){for(let d=0,h=l;d<o;d++,h+=4)r[d]=e[h];let c=(0,eu.deflate)(r);s.push(c),a+=c.byteLength}if(s.length>0){let l=new Uint8Array(a),c=0;for(let d of s)l.set(d,c),c+=d.byteLength;return l}else return s[0]}function uu(e){let n=(0,V.createCanvas)(100,100);try{let t=n.getContext("2d"),i=(0,tu.decodeJpeg)(e,(o,r)=>t.createImageData(o,r));n.width=i.width,n.height=i.height,t.putImageData(i,0,0)}catch(t){console.error("JPEG decompression error",t.message)}return n}var hu=()=>{throw new Error("Canvas not initialized, use initializeCanvas method to set up createCanvas method")};V.createCanvas=hu;var Ho,pu=(e,n)=>(Ho||(Ho=(0,V.createCanvas)(1,1)),Ho.getContext("2d").createImageData(e,n));V.createImageData=pu;typeof document!="undefined"&&(V.createCanvas=(e,n)=>{let t=document.createElement("canvas");return t.width=e,t.height=n,t});function gu(e,n){V.createCanvas=e,V.createImageData=n||V.createImageData}});var Si=ee(wi=>{"use strict";wi.byteLength=bu;wi.toByteArray=wu;wi.fromByteArray=xu;var dt=[],$e=[],mu=typeof Uint8Array!="undefined"?Uint8Array:Array,Wo="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";for(Wt=0,ya=Wo.length;Wt<ya;++Wt)dt[Wt]=Wo[Wt],$e[Wo.charCodeAt(Wt)]=Wt;var Wt,ya;$e[45]=62;$e[95]=63;function wa(e){var n=e.length;if(n%4>0)throw new Error("Invalid string. Length must be a multiple of 4");var t=e.indexOf("=");t===-1&&(t=n);var i=t===n?0:4-t%4;return[t,i]}function bu(e){var n=wa(e),t=n[0],i=n[1];return(t+i)*3/4-i}function yu(e,n,t){return(n+t)*3/4-t}function wu(e){var n,t=wa(e),i=t[0],o=t[1],r=new mu(yu(e,i,o)),s=0,a=o>0?i-4:i,l;for(l=0;l<a;l+=4)n=$e[e.charCodeAt(l)]<<18|$e[e.charCodeAt(l+1)]<<12|$e[e.charCodeAt(l+2)]<<6|$e[e.charCodeAt(l+3)],r[s++]=n>>16&255,r[s++]=n>>8&255,r[s++]=n&255;return o===2&&(n=$e[e.charCodeAt(l)]<<2|$e[e.charCodeAt(l+1)]>>4,r[s++]=n&255),o===1&&(n=$e[e.charCodeAt(l)]<<10|$e[e.charCodeAt(l+1)]<<4|$e[e.charCodeAt(l+2)]>>2,r[s++]=n>>8&255,r[s++]=n&255),r}function Su(e){return dt[e>>18&63]+dt[e>>12&63]+dt[e>>6&63]+dt[e&63]}function _u(e,n,t){for(var i,o=[],r=n;r<t;r+=3)i=(e[r]<<16&16711680)+(e[r+1]<<8&65280)+(e[r+2]&255),o.push(Su(i));return o.join("")}function xu(e){for(var n,t=e.length,i=t%3,o=[],r=16383,s=0,a=t-i;s<a;s+=r)o.push(_u(e,s,s+r>a?a:s+r));return i===1?(n=e[t-1],o.push(dt[n>>2]+dt[n<<4&63]+"==")):i===2&&(n=(e[t-2]<<8)+e[t-1],o.push(dt[n>>10]+dt[n>>4&63]+dt[n<<2&63]+"=")),o.join("")}});var ka=ee(un=>{"use strict";Object.defineProperty(un,"__esModule",{value:!0});un.stringLengthInBytes=xa;un.encodeStringTo=va;un.encodeString=ku;un.decodeString=Iu;function Sa(e){return(e&4294967168)===0?1:(e&4294965248)===0?2:(e&4294901760)===0?3:4}function _a(e,n){let t=e.charCodeAt(n);if(t>=55296&&t<=56319&&n+1<e.length){let i=e.charCodeAt(n+1);if(i>=56320&&i<=57343)return{code:((t&1023)<<10)+(i&1023)+65536,size:2}}return t>=55296&&t<=57343?{code:65533,size:1}:{code:t,size:1}}function xa(e){let n=0;for(let t=0;t<e.length;){let{code:i,size:o}=_a(e,t);n+=Sa(i),t+=o}return n}function vu(e,n,t){let i=Sa(t);switch(i){case 1:e[n]=t;break;case 2:e[n]=t>>6&31|192,e[n+1]=t&63|128;break;case 3:e[n]=t>>12&15|224,e[n+1]=t>>6&63|128,e[n+2]=t&63|128;break;default:e[n]=t>>18&7|240,e[n+1]=t>>12&63|128,e[n+2]=t>>6&63|128,e[n+3]=t&63|128;break}return i}function va(e,n,t){for(let i=0;i<t.length;){let{code:o,size:r}=_a(t,i);n+=vu(e,n,o),i+=r}return n}function ku(e){if(e.length>1e3&&typeof TextEncoder!="undefined")return new TextEncoder().encode(e);let n=new Uint8Array(xa(e));return va(n,0,e),n}function Iu(e){if(e.byteLength>1e3&&typeof TextDecoder!="undefined")return new TextDecoder().decode(e);let n=[];function t(l){l>65535&&(l-=65536,n.push(String.fromCharCode(l>>>10&1023|55296)),l=56320|l&1023),n.push(String.fromCharCode(l))}let i=0,o=0,r=0,s=128,a=191;for(let l=0;l<e.length;l++){let c=e[l];if(r===0){c<=127?t(c):c>=194&&c<=223?(r=1,i=c&31):c>=224&&c<=239?(c===224&&(s=160),c===237&&(a=159),r=2,i=c&15):c>=240&&c<=244?(c===240&&(s=144),c===244&&(a=143),r=3,i=c&7):t(65533);continue}if(c<s||c>a){i=0,r=0,o=0,s=128,a=191,t(65533),l--;continue}s=128,a=191,i=i<<6|c&63,o++,o===r&&(t(i),i=0,r=0,o=0)}return r!==0&&t(65533),n.join("")}});var Ii=ee(k=>{"use strict";var Fu=k&&k.__rest||function(e,n){var t={};for(var i in e)Object.prototype.hasOwnProperty.call(e,i)&&n.indexOf(i)<0&&(t[i]=e[i]);if(e!=null&&typeof Object.getOwnPropertySymbols=="function")for(var o=0,i=Object.getOwnPropertySymbols(e);o<i.length;o++)n.indexOf(i[o])<0&&Object.prototype.propertyIsEnumerable.call(e,i[o])&&(t[i[o]]=e[i[o]]);return t};Object.defineProperty(k,"__esModule",{value:!0});k.IntC=k.IntE=k.Drct=k.WndM=k.CntE=k.FlCl=k.ExtR=k.ExtT=k.DfsM=k.blurType=k.Lns=k.MztT=k.Chnl=k.Dstr=k.ZZTy=k.Wvtp=k.SphM=k.RplS=k.Cnvr=k.UndA=k.DspM=k.SmBQ=k.SmBM=k.BlrQ=k.BlrM=k.strokeStyleLineAlignment=k.strokeStyleLineJoinType=k.strokeStyleLineCapType=k.ESliceBGColorType=k.ESliceOrigin=k.ESliceVertAlign=k.ESliceHorzAlign=k.ESliceType=k.FrFl=k.FStl=k.ClrS=k.gradientInterpolationMethodType=k.stdTrackID=k.animInterpStyleEnum=k.GrdT=k.IGSr=k.BETE=k.BESs=k.bvlT=k.BESl=k.BlnM=k.warpStyle=k.Annt=k.Ornt=k.textGridding=void 0;k.presetKindType=k.prjM=k.FlMd=void 0;k.setLogErrors=Ou;k.readAsciiStringOrClassId=ft;k.readDescriptorStructure=Xo;k.writeDescriptorStructure=qo;k.readVersionAndDescriptor=Lu;k.writeVersionAndDescriptor=Mu;k.horzVrtcToXY=xi;k.xyToHorzVrtc=vi;k.descBoundsToBounds=Tu;k.boundsToDescBounds=Bu;k.serializeEffects=Ta;k.parseEffects=Ba;k.parseTrackList=Ru;k.serializeTrackList=ju;k.parseVectorContent=zu;k.serializeVectorContent=Nu;k.parseColor=Zt;k.serializeColor=Xt;k.parseAngle=Vn;k.parsePercent=_e;k.parsePercentOrAngle=Ha;k.parseUnits=Je;k.parseUnitsOrNumber=Vu;k.parseUnitsToNumber=Gu;k.unitsAngle=hn;k.unitsPercent=ke;k.unitsPercentF=Zo;k.unitsValue=ut;k.frac=Hu;var R=At(),q=Et(),Y=pn();function Du(e){let n={};return Object.keys(e).forEach(t=>n[e[t]]=t),n}var zn={"#Ang":"Angle","#Rsl":"Density","#Rlt":"Distance","#Nne":"None","#Prc":"Percent","#Pxl":"Pixels","#Mlm":"Millimeters","#Pnt":"Points",RrPi:"Picas",RrIn:"Inches",RrCm:"Centimeters"},_i=Du(zn),Nn=!1;function Ou(e){Nn=e}function A(e,n){return{name:e,classID:n}}var K=A("","null"),$o=!1,Ea={strokeStyleContent:A("","solidColorLayer"),printProofSetup:A($o?"\\u6821\\u6837\\u8BBE\\u7F6E":"Proof Setup","proofSetup"),Grad:A($o?"\\u6E10\\u53D8":"Gradient","Grdn"),Trnf:A($o?"\\u53D8\\u6362":"Transform","Trnf"),patternFill:A("","patternFill"),ebbl:A("","ebbl"),SoFi:A("","SoFi"),GrFl:A("","GrFl"),sdwC:A("","RGBC"),hglC:A("","RGBC"),"Clr ":A("","RGBC"),tintColor:A("","RGBC"),Ofst:A("","Pnt "),ChFX:A("","ChFX"),MpgS:A("","ShpC"),DrSh:A("","DrSh"),IrSh:A("","IrSh"),OrGl:A("","OrGl"),IrGl:A("","IrGl"),TrnS:A("","ShpC"),Ptrn:A("","Ptrn"),FrFX:A("","FrFX"),phase:A("","Pnt "),frameStep:K,duration:K,workInTime:K,workOutTime:K,audioClipGroupList:K,bounds:A("","Rctn"),customEnvelopeWarp:A("","customEnvelopeWarp"),warp:A("","warp"),"Sz  ":A("","Pnt "),origin:A("","Pnt "),autoExpandOffset:A("","Pnt "),keyOriginShapeBBox:A("","unitRect"),Vrsn:K,psVersion:K,docDefaultNewArtboardBackgroundColor:A("","RGBC"),artboardRect:A("","classFloatRect"),keyOriginRRectRadii:A("","radii"),keyOriginBoxCorners:K,rectangleCornerA:A("","Pnt "),rectangleCornerB:A("","Pnt "),rectangleCornerC:A("","Pnt "),rectangleCornerD:A("","Pnt "),compInfo:K,quiltWarp:A("","quiltWarp"),generatorSettings:K,crema:K,FrIn:K,blendOptions:K,FXRf:K,Lefx:K,time:K,animKey:K,timeScope:K,inTime:K,outTime:K,sheetStyle:K,translation:K,Skew:K,boundingBox:A("","boundingBox"),"Lnk ":A("","ExternalFileLink"),frameReader:A("","FrameReader"),effectParams:A("","motionTrackEffectParams"),Impr:A("None","none"),Anch:A("","Pnt "),"Fwd ":A("","Pnt "),"Bwd ":A("","Pnt "),FlrC:A("","Pnt "),meshBoundaryPath:A("","pathClass"),filterFX:A("","filterFXStyle"),Fltr:A("","rigidTransform"),FrgC:A("","RGBC"),BckC:A("","RGBC"),sdwM:A("Parameters","adaptCorrectTones"),hglM:A("Parameters","adaptCorrectTones"),customShape:A("","customShape"),origFXRefPoint:K,FXRefPoint:K,ClMg:A("","ClMg")},Pa={"Crv ":A("","CrPt"),Clrs:A("","Clrt"),Trns:A("","TrnS"),keyDescriptorList:K,solidFillMulti:A("","SoFi"),gradientFillMulti:A("","GrFl"),dropShadowMulti:A("","DrSh"),innerShadowMulti:A("","IrSh"),frameFXMulti:A("","FrFX"),FrIn:K,FSts:K,LaSt:K,sheetTimelineOptions:K,trackList:A("","animationTrack"),globalTrackList:A("","animationTrack"),keyList:K,audioClipGroupList:K,audioClipList:K,countObjectList:A("","countObject"),countGroupList:A("","countGroup"),slices:A("","slice"),"Pts ":A("","Pthp"),SbpL:A("","SbpL"),pathComponents:A("","PaCm"),filterFXList:A("","filterFX"),puppetShapeList:A("","puppetShape"),channelDenoise:A("","channelDenoiseParams"),ShrP:A("","Pnt "),layerSettings:K,list:K,Adjs:A("","CrvA")},Ia={TEXT:["Txt ","printerName","Nm  ","Idnt","blackAndWhitePresetFileName","LUT3DFileName","presetFileName","curvesPresetFileName","mixerPresetFileName","placed","description","reason","artboardPresetName","json","clipID","relPath","fullPath","mediaDescriptor","Msge","altTag","url","cellText","preset","KnNm","FPth","comment","originalPath"],tdta:["EngineData","LUT3DFileData","indexArray","originalVertexArray","deformedVertexArray","LqMe"],long:["TextIndex","RndS","Mdpn","Smth","Lctn","strokeStyleVersion","LaID","Vrsn","Cnt ","Brgh","Cntr","means","vibrance","Strt","bwPresetKind","comp","compID","originalCompID","curvesPresetKind","mixerPresetKind","uOrder","vOrder","PgNm","totalPages","Crop","numerator","denominator","frameCount","Annt","keyOriginType","unitValueQuadVersion","keyOriginIndex","major","minor","fix","docDefaultNewArtboardBackgroundType","artboardBackgroundType","numModifyingFX","deformNumRows","deformNumCols","FrID","FrDl","FsID","LCnt","AFrm","AFSt","numBefore","numAfter","Spcn","minOpacity","maxOpacity","BlnM","sheetID","gblA","globalAltitude","descVersion","frameReaderType","LyrI","zoomOrigin","fontSize","Rds ","sliceID","topOutset","leftOutset","bottomOutset","rightOutset","filterID","meshQuality","meshExpansion","meshRigidity","VrsM","VrsN","NmbG","WLMn","WLMx","AmMn","AmMx","SclH","SclV","Lvl ","TlNm","TlOf","FlRs","Thsh","ShrS","ShrE","FlRs","Vrnc","Strg","ExtS","ExtD","HrzS","VrtS","NmbR","EdgF","Ang1","Ang2","Ang3","Ang4","lastAppliedComp","capturedInfo"],enum:["textGridding","Ornt","warpStyle","warpRotate","Inte","Bltn","ClrS","BlrQ","bvlT","bvlS","bvlD","Md  ","glwS","GrdF","GlwT","RplS","BlrM","SmBM","strokeStyleLineCapType","strokeStyleLineJoinType","strokeStyleLineAlignment","strokeStyleBlendMode","PntT","Styl","lookupType","LUTFormat","dataOrder","tableOrder","enableCompCore","enableCompCoreGPU","compCoreSupport","compCoreGPUSupport","Engn","enableCompCoreThreads","gs99","FrDs","trackID","animInterpStyle","horzAlign","vertAlign","bgColorType","shapeOperation","UndA","Wvtp","Drct","WndM","Edg ","FlCl","IntE","IntC","Cnvr","Fl  ","Dstr","MztT","Lns ","ExtT","DspM","ExtR","ZZTy","SphM","SmBQ","placedLayerOCIOConversion","gradientsInterpolationMethod"],bool:["PstS","printSixteenBit","masterFXSwitch","enab","uglg","antialiasGloss","useShape","useTexture","uglg","antialiasGloss","useShape","Vsbl","useTexture","Algn","Rvrs","Dthr","Invr","VctC","ShTr","layerConceals","strokeEnabled","fillEnabled","strokeStyleScaleLock","strokeStyleStrokeAdjust","hardProof","MpBl","paperWhite","useLegacy","Auto","Lab ","useTint","keyShapeInvalidated","autoExpandEnabled","autoNestEnabled","autoPositionEnabled","shrinkwrapOnSaveEnabled","present","showInDialog","overprint","sheetDisclosed","lightsDisclosed","meshesDisclosed","materialsDisclosed","hasMotion","muted","Effc","selected","autoScope","fillCanvas","cellTextIsHTML","Smoo","Clsp","validAtPosition","rigidType","hasoptions","filterMaskEnable","filterMaskLinked","filterMaskExtendWithWhite","removeJPEGArtifact","Mnch","ExtF","ExtM","moreAccurate","GpuY","LIWy","Cnty"],doub:["warpValue","warpPerspective","warpPerspectiveOther","Intr","Wdth","Hght","strokeStyleMiterLimit","strokeStyleResolution","layerTime","keyOriginResolution","xx","xy","yx","yy","tx","ty","FrGA","frameRate","audioLevel","rotation","X   ","Y   ","redFloat","greenFloat","blueFloat","imageResolution","PuX0","PuX1","PuX2","PuX3","PuY0","PuY1","PuY2","PuY3"],UntF:["sdwO","hglO","lagl","Lald","srgR","blur","Sftn","Opct","Dstn","Angl","Ckmt","Nose","Inpr","ShdN","strokeStyleLineWidth","strokeStyleLineDashOffset","strokeStyleOpacity","H   ","Top ","Left","Btom","Rght","Rslt","topRight","topLeft","bottomLeft","bottomRight","ClNs","Shrp"],VlLs:["Crv ","Clrs","Mnm ","Mxm ","Trns","pathList","strokeStyleLineDashSet","FrLs","slices","LaSt","Trnf","nonAffineTransform","keyDescriptorList","guideIndeces","gradientFillMulti","solidFillMulti","frameFXMulti","innerShadowMulti","dropShadowMulti","FrIn","FSts","FsFr","sheetTimelineOptions","audioClipList","trackList","globalTrackList","keyList","audioClipList","warpValues","selectedPin","Pts ","SbpL","pathComponents","pinOffsets","posFinalPins","pinVertexIndices","PinP","PnRt","PnOv","PnDp","filterFXList","puppetShapeList","ShrP","channelDenoise","Mtrx","layerSettings","list","compList","Adjs"],ObAr:["meshPoints","quiltSliceX","quiltSliceY"],"obj ":["null","Chnl"],"Pth ":["DspF"]},Cu=["Rd  ","Grn ","Bl  ","Yllw","Ylw ","Cyn ","Mgnt","Blck","Gry ","Lmnc","A   ","B   "],Ua={"Mnm ":"long","Mxm ":"long",FrLs:"long",strokeStyleLineDashSet:"UntF",Trnf:"doub",nonAffineTransform:"doub",keyDescriptorList:"Objc",gradientFillMulti:"Objc",solidFillMulti:"Objc",frameFXMulti:"Objc",innerShadowMulti:"Objc",dropShadowMulti:"Objc",LaSt:"Objc",FrIn:"Objc",FSts:"Objc",FsFr:"long",blendOptions:"Objc",sheetTimelineOptions:"Objc",keyList:"Objc",warpValues:"doub",selectedPin:"long","Pts ":"Objc",SbpL:"Objc",pathComponents:"Objc",pinOffsets:"doub",posFinalPins:"doub",pinVertexIndices:"long",PinP:"doub",PnRt:"long",PnOv:"bool",PnDp:"doub",filterFXList:"Objc",puppetShapeList:"Objc",ShrP:"Objc",channelDenoise:"Objc",Mtrx:"long",compList:"long",Chnl:"enum"},ki={};for(let e of Object.keys(Ia))for(let n of Ia[e])ki[n]=e;for(let e of Object.keys(Ea))ki[e]||(ki[e]="Objc");for(let e of Object.keys(Pa))Ua[e]="Objc";function Au(e,n,t,i){return e==="presetKind"?typeof n=="string"?"enum":"long":e==="null"&&t==="slices"?"TEXT":e==="groupID"?t==="slices"?"long":"TEXT":e==="Sz  "?"Wdth"in n?"Objc":"units"in n?"UntF":"doub":e==="Type"?typeof n=="string"?"enum":"long":e==="AntA"?typeof n=="string"?"enum":"bool":(e==="Hrzn"||e==="Vrtc")&&(i.Type==="keyType.Pstn"||i._classID==="Ofst")?"long":e==="Hrzn"||e==="Vrtc"||e==="Top "||e==="Left"||e==="Btom"||e==="Rght"?t==="slices"?"long":typeof n=="number"?"doub":"UntF":e==="Vrsn"?typeof n=="number"?"long":"Objc":e==="Rd  "||e==="Grn "||e==="Bl  "?t==="artd"?"long":"doub":e==="Trnf"?Array.isArray(n)?"VlLs":"Objc":ki[e]}function ft(e){let n=(0,q.readInt32)(e);return(0,q.readAsciiString)(e,n||4)}function wt(e,n){if(n.length===4&&n!=="warp"&&n!=="time"&&n!=="hold"&&n!=="list")(0,Y.writeInt32)(e,0),(0,Y.writeSignature)(e,n);else{(0,Y.writeInt32)(e,n.length);for(let t=0;t<n.length;t++)(0,Y.writeUint8)(e,n.charCodeAt(t))}}function Xo(e,n){let t=$t(e),i=n?{_name:t.name,_classID:t.classID}:{},o=(0,q.readUint32)(e);for(let r=0;r<o;r++){let s=ft(e),a=(0,q.readSignature)(e),l=La(e,a,n);i[s]=l}return i}function qo(e,n,t,i,o){Nn&&!t&&console.log("Missing classId for: ",n,t,i),(0,Y.writeUnicodeStringWithPadding)(e,n),wt(e,t);let r=Object.keys(i),s=r.length;"_name"in i&&s--,"_classID"in i&&s--,(0,Y.writeUint32)(e,s);for(let a of r){if(a==="_name"||a==="_classID")continue;let l=Au(a,i[a],o,i),c=Ea[a];a==="bounds"&&o==="text"?c=A("","bounds"):a==="origin"?l=o==="slices"?"enum":"Objc":(a==="Cyn "||a==="Mgnt"||a==="Ylw "||a==="Blck")&&i._classID==="CMYC"?l="doub":/^PN[a-z][a-z]$/.test(a)?l="TEXT":/^PT[a-z][a-z]$/.test(a)?l="long":/^PF[a-z][a-z]$/.test(a)||(a==="Rds "||a==="Thsh")&&typeof i[a]=="number"&&i._classID==="SmrB"?l="doub":a==="ClSz"||a==="Rds "||a==="Amnt"?l=typeof i[a]=="number"?"long":"UntF":(a==="sdwM"||a==="hglM")&&typeof i[a]=="string"||a==="blur"&&typeof i[a]=="string"?l="enum":a==="Hght"&&typeof i[a]=="number"&&i._classID==="Embs"||a==="Angl"&&typeof i[a]=="number"&&(i._classID==="Embs"||i._classID==="smartSharpen"||i._classID==="Twrl"||i._classID==="MtnB")?l="long":a==="Angl"&&typeof i[a]=="number"?l="doub":a==="bounds"&&o==="slices"?(l="Objc",c=A("","Rct1")):a==="Scl "?typeof i[a]=="object"&&"Hrzn"in i[a]?(l="Objc",c=K):typeof i[a]=="number"?l="long":l="UntF":a==="audioClipGroupList"&&r.length===1?l="VlLs":(a==="Strt"||a==="Brgh")&&"H   "in i?l="doub":a==="Wdth"&&typeof i[a]=="object"?l="UntF":a==="Ofst"&&typeof i[a]=="number"?l="long":a==="Strt"&&typeof i[a]=="object"?(l="Objc",c=K):Cu.indexOf(a)!==-1?l=t==="RGBC"&&o!=="artd"?"doub":"long":a==="profile"?l=t==="printOutput"?"TEXT":"tdta":a==="strokeStyleContent"?i[a]["Clr "]?c=A("","solidColorLayer"):i[a].Grad?c=A("","gradientLayer"):i[a].Ptrn?c=A("","patternLayer"):Nn&&console.log("Invalid strokeStyleContent value",i[a]):a==="bounds"&&o==="quiltWarp"&&(c=A("","classFloatRect")),c&&c.classID==="RGBC"&&"H   "in i[a]&&(c={classID:"HSBC",name:""}),wt(e,a),(0,Y.writeSignature)(e,l||"long"),Ma(e,l||"long",i[a],a,c,o),Nn&&!l&&console.log(`Missing descriptor field type for: \'${a}\' in`,i)}}function La(e,n,t){switch(n){case"obj ":return Pu(e);case"Objc":case"GlbO":return Xo(e,t);case"VlLs":{let i=(0,q.readInt32)(e),o=[];for(let r=0;r<i;r++){let s=(0,q.readSignature)(e);o.push(La(e,s,t))}return o}case"doub":return(0,q.readFloat64)(e);case"UntF":{let i=(0,q.readSignature)(e),o=(0,q.readFloat64)(e);if(!zn[i])throw new Error(`Invalid units: ${i}`);return{units:zn[i],value:o}}case"UnFl":{let i=(0,q.readSignature)(e),o=(0,q.readFloat32)(e);if(!zn[i])throw new Error(`Invalid units: ${i}`);return{units:zn[i],value:o}}case"TEXT":return(0,q.readUnicodeString)(e);case"enum":{let i=ft(e),o=ft(e);return`${i}.${o}`}case"long":return(0,q.readInt32)(e);case"comp":{let i=(0,q.readUint32)(e),o=(0,q.readUint32)(e);return{low:i,high:o}}case"bool":return!!(0,q.readUint8)(e);case"type":case"GlbC":return $t(e);case"alis":{let i=(0,q.readInt32)(e);return(0,q.readAsciiString)(e,i)}case"tdta":{let i=(0,q.readInt32)(e);return(0,q.readBytes)(e,i)}case"ObAr":{(0,q.readInt32)(e),(0,q.readUnicodeString)(e),ft(e);let i=(0,q.readInt32)(e),o=[];for(let r=0;r<i;r++){let s=ft(e);(0,q.readSignature)(e),(0,q.readSignature)(e);let a=(0,q.readInt32)(e),l=[];for(let c=0;c<a;c++)l.push((0,q.readFloat64)(e));o.push({type:s,values:l})}return o}case"Pth ":{(0,q.readInt32)(e);let i=(0,q.readSignature)(e);(0,q.readInt32LE)(e);let o=(0,q.readInt32LE)(e),r=(0,q.readUnicodeStringWithLengthLE)(e,o);return{sig:i,path:r}}default:throw new Error(`Invalid TySh descriptor OSType: ${n} at ${e.offset.toString(16)}`)}}var Eu={meshPoints:"rationalPoint",quiltSliceX:"UntF",quiltSliceY:"UntF"};function Ma(e,n,t,i,o,r){switch(n){case"obj ":Uu(e,i,t);break;case"Objc":case"GlbO":{if(typeof t!="object")throw new Error(`Invalid struct value: ${JSON.stringify(t)}, key: ${i}`);if(!o)throw new Error(`Missing ext type for: \'${i}\' (${JSON.stringify(t)})`);let s=t._name||o.name,a=t._classID||o.classID;qo(e,s,a,t,r);break}case"VlLs":if(!Array.isArray(t))throw new Error(`Invalid list value: ${JSON.stringify(t)}, key: ${i}`);(0,Y.writeInt32)(e,t.length);for(let s=0;s<t.length;s++){let a=Ua[i];(0,Y.writeSignature)(e,a||"long"),Ma(e,a||"long",t[s],`${i}[]`,Pa[i],r),Nn&&!a&&console.log(`Missing descriptor array type for: \'${i}\' in`,t)}break;case"doub":if(typeof t!="number")throw new Error(`Invalid number value: ${JSON.stringify(t)}, key: ${i}`);(0,Y.writeFloat64)(e,t);break;case"UntF":if(!_i[t.units])throw new Error(`Invalid units: ${t.units} in ${i}`);(0,Y.writeSignature)(e,_i[t.units]),(0,Y.writeFloat64)(e,t.value);break;case"UnFl":if(!_i[t.units])throw new Error(`Invalid units: ${t.units} in ${i}`);(0,Y.writeSignature)(e,_i[t.units]),(0,Y.writeFloat32)(e,t.value);break;case"TEXT":(0,Y.writeUnicodeStringWithPadding)(e,t);break;case"enum":{if(typeof t!="string")throw new Error(`Invalid enum value: ${JSON.stringify(t)}, key: ${i}`);let[s,a]=t.split(".");wt(e,s),wt(e,a);break}case"long":if(typeof t!="number")throw new Error(`Invalid integer value: ${JSON.stringify(t)}, key: ${i}`);(0,Y.writeInt32)(e,t);break;case"bool":if(typeof t!="boolean")throw new Error(`Invalid boolean value: ${JSON.stringify(t)}, key: ${i}`);(0,Y.writeUint8)(e,t?1:0);break;case"tdta":(0,Y.writeInt32)(e,t.byteLength),(0,Y.writeBytes)(e,t);break;case"ObAr":{(0,Y.writeInt32)(e,16),(0,Y.writeUnicodeStringWithPadding)(e,"");let s=Eu[i];if(!s)throw new Error(`Not implemented ObArType for: ${i}`);wt(e,s),(0,Y.writeInt32)(e,t.length);for(let a=0;a<t.length;a++){wt(e,t[a].type),(0,Y.writeSignature)(e,"UnFl"),(0,Y.writeSignature)(e,"#Pxl"),(0,Y.writeInt32)(e,t[a].values.length);for(let l=0;l<t[a].values.length;l++)(0,Y.writeFloat64)(e,t[a].values[l])}break}case"Pth ":{let s=12+t.path.length*2;(0,Y.writeInt32)(e,s),(0,Y.writeSignature)(e,t.sig),(0,Y.writeInt32LE)(e,s),(0,Y.writeInt32LE)(e,t.path.length),(0,Y.writeUnicodeStringWithoutLengthLE)(e,t.path);break}default:throw new Error(`Not implemented descriptor OSType: ${n}`)}}function Pu(e){let n=(0,q.readInt32)(e),t=[];for(let i=0;i<n;i++){let o=(0,q.readSignature)(e);switch(o){case"prop":{$t(e);let r=ft(e);t.push(r);break}case"Clss":t.push($t(e));break;case"Enmr":{$t(e);let r=ft(e),s=ft(e);t.push(`${r}.${s}`);break}case"rele":{$t(e),t.push((0,q.readUint32)(e));break}case"Idnt":t.push((0,q.readInt32)(e));break;case"indx":t.push((0,q.readInt32)(e));break;case"name":{$t(e),t.push((0,q.readUnicodeString)(e));break}default:throw new Error(`Invalid descriptor reference type: ${o}`)}}return t}function Uu(e,n,t){(0,Y.writeInt32)(e,t.length);for(let i=0;i<t.length;i++){let o=t[i],r="unknown";switch(typeof o=="string"&&(/^[a-z ]+\\.[a-z ]+$/i.test(o)?r="Enmr":r="name"),(0,Y.writeSignature)(e,r),r){case"Enmr":{let[s,a]=o.split(".");Fa(e,"\\0",s),wt(e,s),wt(e,a);break}case"name":{Fa(e,"\\0","Lyr "),(0,Y.writeUnicodeString)(e,o+"\\0");break}default:throw new Error(`Invalid descriptor reference type: ${r}`)}}return t}function $t(e){let n=(0,q.readUnicodeString)(e),t=ft(e);return{name:n,classID:t}}function Fa(e,n,t){(0,Y.writeUnicodeString)(e,n),wt(e,t)}function Lu(e,n=!1){let t=(0,q.readUint32)(e);if(t!==16)throw new Error(`Invalid descriptor version: ${t}`);return Xo(e,n)}function Mu(e,n,t,i,o=""){(0,Y.writeUint32)(e,16),qo(e,n,t,i,o)}function xi(e){return{x:e.Hrzn,y:e.Vrtc}}function vi(e){return{Hrzn:e.x,Vrtc:e.y}}function Tu(e){return{top:Je(e["Top "]),left:Je(e.Left),right:Je(e.Rght),bottom:Je(e.Btom)}}function Bu(e){return{Left:ut(e.left,"bounds.left"),"Top ":ut(e.top,"bounds.top"),Rght:ut(e.right,"bounds.right"),Btom:ut(e.bottom,"bounds.bottom")}}function Da(e){let n={enabled:!!e.enab,position:k.FStl.decode(e.Styl),fillType:k.FrFl.decode(e.PntT),blendMode:k.BlnM.decode(e["Md  "]),opacity:_e(e.Opct),size:Je(e["Sz  "])};return e.present!==void 0&&(n.present=e.present),e.showInDialog!==void 0&&(n.showInDialog=e.showInDialog),e.overprint!==void 0&&(n.overprint=e.overprint),e["Clr "]&&(n.color=Zt(e["Clr "])),e.Grad&&(n.gradient=za(e)),e.Ptrn&&(n.pattern=Na(e)),n}function Oa(e){let n={};return n.enab=!!e.enabled,e.present!==void 0&&(n.present=!!e.present),e.showInDialog!==void 0&&(n.showInDialog=!!e.showInDialog),n.Styl=k.FStl.encode(e.position),n.PntT=k.FrFl.encode(e.fillType),n["Md  "]=k.BlnM.encode(e.blendMode),n.Opct=ke(e.opacity),n["Sz  "]=ut(e.size,"size"),e.color&&(n["Clr "]=Xt(e.color)),e.gradient&&(n=Object.assign(Object.assign({},n),Va(e.gradient))),e.pattern&&(n=Object.assign(Object.assign({},n),Ga(e.pattern))),e.overprint!==void 0&&(n.overprint=!!e.overprint),n}function Ta(e,n,t){var i,o,r;let s=t?{"Scl ":Zo((i=e.scale)!==null&&i!==void 0?i:1),masterFXSwitch:!e.disabled}:{masterFXSwitch:!e.disabled,"Scl ":Zo((o=e.scale)!==null&&o!==void 0?o:1)},a=["dropShadow","innerShadow","solidFill","gradientOverlay","stroke"];for(let d of a)if(e[d]&&!Array.isArray(e[d]))throw new Error(`${d} should be an array`);let l=d=>!!d&&d.length>1&&t,c=d=>!!d&&d.length>=1&&(!t||d.length===1);if(c(e.dropShadow)&&(s.DrSh=ze(e.dropShadow[0],"dropShadow",n)),l(e.dropShadow)&&(s.dropShadowMulti=e.dropShadow.map(d=>ze(d,"dropShadow",n))),c(e.innerShadow)&&(s.IrSh=ze(e.innerShadow[0],"innerShadow",n)),l(e.innerShadow)&&(s.innerShadowMulti=e.innerShadow.map(d=>ze(d,"innerShadow",n))),e.outerGlow&&(s.OrGl=ze(e.outerGlow,"outerGlow",n)),l(e.solidFill)&&(s.solidFillMulti=e.solidFill.map(d=>ze(d,"solidFill",n))),l(e.gradientOverlay)&&(s.gradientFillMulti=e.gradientOverlay.map(d=>ze(d,"gradientOverlay",n))),l(e.stroke)&&(s.frameFXMulti=e.stroke.map(d=>Oa(d))),e.innerGlow&&(s.IrGl=ze(e.innerGlow,"innerGlow",n)),e.bevel&&(s.ebbl=ze(e.bevel,"bevel",n)),c(e.solidFill)&&(s.SoFi=ze(e.solidFill[0],"solidFill",n)),e.patternOverlay&&(s.patternFill=ze(e.patternOverlay,"patternOverlay",n)),c(e.gradientOverlay)&&(s.GrFl=ze(e.gradientOverlay[0],"gradientOverlay",n)),e.satin&&(s.ChFX=ze(e.satin,"satin",n)),c(e.stroke)&&(s.FrFX=Oa((r=e.stroke)===null||r===void 0?void 0:r[0])),t){s.numModifyingFX=0;for(let d of Object.keys(e)){let h=e[d];if(Array.isArray(h))for(let f of h)f.enabled&&s.numModifyingFX++;else h.enabled&&s.numModifyingFX++}}return s}function Ba(e,n){let t={},{masterFXSwitch:i,DrSh:o,dropShadowMulti:r,IrSh:s,innerShadowMulti:a,OrGl:l,IrGl:c,ebbl:d,SoFi:h,solidFillMulti:f,patternFill:u,GrFl:p,gradientFillMulti:_,ChFX:b,FrFX:y,frameFXMulti:S,numModifyingFX:x}=e,v=Fu(e,["masterFXSwitch","DrSh","dropShadowMulti","IrSh","innerShadowMulti","OrGl","IrGl","ebbl","SoFi","solidFillMulti","patternFill","GrFl","gradientFillMulti","ChFX","FrFX","frameFXMulti","numModifyingFX"]);return i||(t.disabled=!0),e["Scl "]&&(t.scale=_e(e["Scl "])),o&&(t.dropShadow=[je(o,n)]),r&&(t.dropShadow=r.map(F=>je(F,n))),s&&(t.innerShadow=[je(s,n)]),a&&(t.innerShadow=a.map(F=>je(F,n))),l&&(t.outerGlow=je(l,n)),c&&(t.innerGlow=je(c,n)),d&&(t.bevel=je(d,n)),h&&(t.solidFill=[je(h,n)]),f&&(t.solidFill=f.map(F=>je(F,n))),u&&(t.patternOverlay=je(u,n)),p&&(t.gradientOverlay=[je(p,n)]),_&&(t.gradientOverlay=_.map(F=>je(F,n))),b&&(t.satin=je(b,n)),y&&(t.stroke=[Da(y)]),S&&(t.stroke=S.map(F=>Da(F))),n&&Object.keys(v).length>1&&console.log("Unhandled effect keys:",v),t}function Ca(e,n){let t=[];for(let i=0;i<e.length;i++){let o=e[i],{time:{denominator:r,numerator:s},selected:a,animKey:l}=o,c={numerator:s,denominator:r},d=k.animInterpStyleEnum.decode(o.animInterpStyle);switch(l.Type){case"keyType.Opct":t.push({interpolation:d,time:c,selected:a,type:"opacity",value:_e(l.Opct)});break;case"keyType.Pstn":t.push({interpolation:d,time:c,selected:a,type:"position",x:l.Hrzn,y:l.Vrtc});break;case"keyType.Trnf":t.push({interpolation:d,time:c,selected:a,type:"transform",scale:xi(l["Scl "]),skew:xi(l.Skew),rotation:l.rotation,translation:xi(l.translation)});break;case"keyType.sheetStyle":{let h={interpolation:d,time:c,selected:a,type:"style"};l.sheetStyle.Lefx&&(h.style=Ba(l.sheetStyle.Lefx,n)),t.push(h);break}case"keyType.globalLighting":{t.push({interpolation:d,time:c,selected:a,type:"globalLighting",globalAngle:l.gblA,globalAltitude:l.globalAltitude});break}default:throw new Error("Unsupported keyType value")}}return t}function Aa(e){let n=[];for(let t=0;t<e.length;t++){let i=e[t],{time:o,selected:r=!1,interpolation:s}=i,a=k.animInterpStyleEnum.encode(s),l;switch(i.type){case"opacity":l={Type:"keyType.Opct",Opct:ke(i.value)};break;case"position":l={Type:"keyType.Pstn",Hrzn:i.x,Vrtc:i.y};break;case"transform":l={Type:"keyType.Trnf","Scl ":vi(i.scale),Skew:vi(i.skew),rotation:i.rotation,translation:vi(i.translation)};break;case"style":l={Type:"keyType.sheetStyle",sheetStyle:{Vrsn:1,blendOptions:{}}},i.style&&(l.sheetStyle={Vrsn:1,Lefx:Ta(i.style,!1,!1),blendOptions:{}});break;case"globalLighting":{l={Type:"keyType.globalLighting",gblA:i.globalAngle,globalAltitude:i.globalAltitude};break}default:throw new Error("Unsupported keyType value")}n.push({Vrsn:1,animInterpStyle:a,time:o,animKey:l,selected:r})}return n}function Ru(e,n){let t=[];for(let i=0;i<e.length;i++){let o=e[i],r={type:k.stdTrackID.decode(o.trackID),enabled:o.enab,keys:Ca(o.keyList,n)};o.effectParams&&(r.effectParams={fillCanvas:o.effectParams.fillCanvas,zoomOrigin:o.effectParams.zoomOrigin,keys:Ca(o.effectParams.keyList,n)}),t.push(r)}return t}function ju(e){let n=[];for(let t=0;t<e.length;t++){let i=e[t];n.push(Object.assign(Object.assign({trackID:k.stdTrackID.encode(i.type),Vrsn:1,enab:!!i.enabled,Effc:!!i.effectParams},i.effectParams?{effectParams:{keyList:Aa(i.keys),fillCanvas:i.effectParams.fillCanvas,zoomOrigin:i.effectParams.zoomOrigin}}:{}),{keyList:Aa(i.keys)}))}return n}function je(e,n){let t={};for(let i of Object.keys(e)){let o=e[i];switch(i){case"enab":t.enabled=!!o;break;case"uglg":t.useGlobalLight=!!o;break;case"AntA":t.antialiased=!!o;break;case"Algn":t.align=!!o;break;case"Dthr":t.dither=!!o;break;case"Invr":t.invert=!!o;break;case"Rvrs":t.reverse=!!o;break;case"Clr ":t.color=Zt(o);break;case"hglC":t.highlightColor=Zt(o);break;case"sdwC":t.shadowColor=Zt(o);break;case"Styl":t.position=k.FStl.decode(o);break;case"Md  ":t.blendMode=k.BlnM.decode(o);break;case"hglM":t.highlightBlendMode=k.BlnM.decode(o);break;case"sdwM":t.shadowBlendMode=k.BlnM.decode(o);break;case"bvlS":t.style=k.BESl.decode(o);break;case"bvlD":t.direction=k.BESs.decode(o);break;case"bvlT":t.technique=k.bvlT.decode(o);break;case"GlwT":t.technique=k.BETE.decode(o);break;case"glwS":t.source=k.IGSr.decode(o);break;case"Type":t.type=k.GrdT.decode(o);break;case"gs99":t.interpolationMethod=k.gradientInterpolationMethodType.decode(o);break;case"Opct":t.opacity=_e(o);break;case"hglO":t.highlightOpacity=_e(o);break;case"sdwO":t.shadowOpacity=_e(o);break;case"lagl":t.angle=Vn(o);break;case"Angl":t.angle=Vn(o);break;case"Lald":t.altitude=Vn(o);break;case"Sftn":t.soften=Je(o);break;case"srgR":t.strength=_e(o);break;case"blur":t.size=Je(o);break;case"Nose":t.noise=_e(o);break;case"Inpr":t.range=_e(o);break;case"Ckmt":t.choke=Je(o);break;case"ShdN":t.jitter=_e(o);break;case"Dstn":t.distance=Je(o);break;case"Scl ":t.scale=_e(o);break;case"Ptrn":t.pattern={name:o["Nm  "],id:o.Idnt};break;case"phase":t.phase={x:o.Hrzn,y:o.Vrtc};break;case"Ofst":t.offset={x:_e(o.Hrzn),y:_e(o.Vrtc)};break;case"MpgS":case"TrnS":t.contour={name:o["Nm  "],curve:o["Crv "].map(r=>({x:r.Hrzn,y:r.Vrtc}))};break;case"Grad":t.gradient=Ra(o);break;case"useTexture":case"useShape":case"layerConceals":case"present":case"showInDialog":case"antialiasGloss":t[i]=o;break;case"_name":case"_classID":break;default:n&&console.log(`Invalid effect key: \'${i}\', value:`,o)}}return t}function ze(e,n,t){let i={enab:!1};n==="dropShadow"&&(i.TrnS={"Nm  ":"","Crv ":[]});for(let o of Object.keys(e)){let r=o,s=e[r];switch(r){case"enabled":i.enab=!!s;break;case"useGlobalLight":i.uglg=!!s;break;case"antialiased":i.AntA=!!s;break;case"align":i.Algn=!!s;break;case"dither":i.Dthr=!!s;break;case"invert":i.Invr=!!s;break;case"reverse":i.Rvrs=!!s;break;case"color":i["Clr "]=Xt(s);break;case"highlightColor":i.hglC=Xt(s);break;case"shadowColor":i.sdwC=Xt(s);break;case"position":i.Styl=k.FStl.encode(s);break;case"blendMode":i["Md  "]=k.BlnM.encode(s);break;case"highlightBlendMode":i.hglM=k.BlnM.encode(s);break;case"shadowBlendMode":i.sdwM=k.BlnM.encode(s);break;case"style":i.bvlS=k.BESl.encode(s);break;case"direction":i.bvlD=k.BESs.encode(s);break;case"technique":n==="bevel"?i.bvlT=k.bvlT.encode(s):i.GlwT=k.BETE.encode(s);break;case"source":i.glwS=k.IGSr.encode(s);break;case"type":i.Type=k.GrdT.encode(s);break;case"interpolationMethod":i.gs99=k.gradientInterpolationMethodType.encode(s);break;case"opacity":i.Opct=ke(s);break;case"highlightOpacity":i.hglO=ke(s);break;case"shadowOpacity":i.sdwO=ke(s);break;case"angle":n==="gradientOverlay"||n==="patternFill"?i.Angl=hn(s):i.lagl=hn(s);break;case"altitude":i.Lald=hn(s);break;case"soften":i.Sftn=ut(s,r);break;case"strength":i.srgR=ke(s);break;case"size":i.blur=ut(s,r);break;case"noise":i.Nose=ke(s);break;case"range":i.Inpr=ke(s);break;case"choke":i.Ckmt=ut(s,r);break;case"jitter":i.ShdN=ke(s);break;case"distance":i.Dstn=ut(s,r);break;case"scale":i["Scl "]=ke(s);break;case"pattern":i.Ptrn={"Nm  ":s.name,Idnt:s.id};break;case"phase":i.phase={Hrzn:s.x,Vrtc:s.y};break;case"offset":i.Ofst={Hrzn:ke(s.x),Vrtc:ke(s.y)};break;case"contour":{i[n==="satin"?"MpgS":"TrnS"]={"Nm  ":s.name,"Crv ":s.curve.map(a=>({Hrzn:a.x,Vrtc:a.y}))};break}case"gradient":i.Grad=ja(s);break;case"useTexture":case"useShape":case"layerConceals":case"present":case"showInDialog":case"antialiasGloss":i[r]=s;break;default:t&&console.log(`Invalid effect key: \'${r}\', value:`,s)}}return i}function Ra(e){if(e.GrdF==="GrdF.CstS"){let n=e.Intr||4096;return{type:"solid",name:e["Nm  "],smoothness:e.Intr/4096,colorStops:e.Clrs.map(t=>({color:Zt(t["Clr "]),location:t.Lctn/n,midpoint:t.Mdpn/100})),opacityStops:e.Trns.map(t=>({opacity:_e(t.Opct),location:t.Lctn/n,midpoint:t.Mdpn/100}))}}else return{type:"noise",name:e["Nm  "],roughness:e.Smth/4096,colorModel:k.ClrS.decode(e.ClrS),randomSeed:e.RndS,restrictColors:!!e.VctC,addTransparency:!!e.ShTr,min:e["Mnm "].map(n=>n/100),max:e["Mxm "].map(n=>n/100)}}function ja(e){var n,t;if(e.type==="solid"){let i=Math.round(((n=e.smoothness)!==null&&n!==void 0?n:1)*4096);return{"Nm  ":e.name||"",GrdF:"GrdF.CstS",Intr:i,Clrs:e.colorStops.map(o=>{var r;return{"Clr ":Xt(o.color),Type:"Clry.UsrS",Lctn:Math.round(o.location*i),Mdpn:Math.round(((r=o.midpoint)!==null&&r!==void 0?r:.5)*100)}}),Trns:e.opacityStops.map(o=>{var r;return{Opct:ke(o.opacity),Lctn:Math.round(o.location*i),Mdpn:Math.round(((r=o.midpoint)!==null&&r!==void 0?r:.5)*100)}})}}else return{GrdF:"GrdF.ClNs","Nm  ":e.name||"",ShTr:!!e.addTransparency,VctC:!!e.restrictColors,ClrS:k.ClrS.encode(e.colorModel),RndS:e.randomSeed||0,Smth:Math.round(((t=e.roughness)!==null&&t!==void 0?t:1)*4096),"Mnm ":(e.min||[0,0,0,0]).map(i=>i*100),"Mxm ":(e.max||[1,1,1,1]).map(i=>i*100)}}function za(e){let n=Ra(e.Grad);return n.style=k.GrdT.decode(e.Type),e.Dthr!==void 0&&(n.dither=e.Dthr),e.gradientsInterpolationMethod!==void 0&&(n.interpolationMethod=k.gradientInterpolationMethodType.decode(e.gradientsInterpolationMethod)),e.Rvrs!==void 0&&(n.reverse=e.Rvrs),e.Angl!==void 0&&(n.angle=Vn(e.Angl)),e["Scl "]!==void 0&&(n.scale=_e(e["Scl "])),e.Algn!==void 0&&(n.align=e.Algn),e.Ofst!==void 0&&(n.offset={x:_e(e.Ofst.Hrzn),y:_e(e.Ofst.Vrtc)}),n}function Na(e){let n={name:e.Ptrn["Nm  "],id:e.Ptrn.Idnt};return e.Lnkd!==void 0&&(n.linked=e.Lnkd),e.phase!==void 0&&(n.phase={x:e.phase.Hrzn,y:e.phase.Vrtc}),n}function zu(e){if("Grad"in e)return za(e);if("Ptrn"in e)return Object.assign({type:"pattern"},Na(e));if("Clr "in e)return{type:"color",color:Zt(e["Clr "])};throw new Error("Invalid vector content")}function Va(e){let n={};return e.dither!==void 0&&(n.Dthr=e.dither),e.interpolationMethod!==void 0&&(n.gradientsInterpolationMethod=k.gradientInterpolationMethodType.encode(e.interpolationMethod)),e.reverse!==void 0&&(n.Rvrs=e.reverse),e.angle!==void 0&&(n.Angl=hn(e.angle)),n.Type=k.GrdT.encode(e.style),e.align!==void 0&&(n.Algn=e.align),e.scale!==void 0&&(n["Scl "]=ke(e.scale)),e.offset&&(n.Ofst={Hrzn:ke(e.offset.x),Vrtc:ke(e.offset.y)}),n.Grad=ja(e),n}function Ga(e){let n={Ptrn:{"Nm  ":e.name||"",Idnt:e.id||""}};return e.linked!==void 0&&(n.Lnkd=!!e.linked),e.phase!==void 0&&(n.phase={Hrzn:e.phase.x,Vrtc:e.phase.y}),n}function Nu(e){return e.type==="color"?{key:"SoCo",descriptor:{"Clr ":Xt(e.color)}}:e.type==="pattern"?{key:"PtFl",descriptor:Ga(e)}:{key:"GdFl",descriptor:Va(e)}}function Zt(e){if("H   "in e)return{h:Ha(e["H   "]),s:e.Strt,b:e.Brgh};if("Rd  "in e)return{r:e["Rd  "],g:e["Grn "],b:e["Bl  "]};if("Cyn "in e)return{c:e["Cyn "],m:e.Mgnt,y:e["Ylw "],k:e.Blck};if("Gry "in e)return{k:e["Gry "]};if("Lmnc"in e)return{l:e.Lmnc,a:e["A   "],b:e["B   "]};if("redFloat"in e)return{fr:e.redFloat,fg:e.greenFloat,fb:e.blueFloat};throw new Error("Unsupported color descriptor")}function Xt(e){if(e){if("r"in e)return{_name:"",_classID:"RGBC","Rd  ":e.r||0,"Grn ":e.g||0,"Bl  ":e.b||0};if("fr"in e)return{_name:"",_classID:"RGBC",redFloat:e.fr,greenFloat:e.fg,blueFloat:e.fb};if("h"in e)return{_name:"",_classID:"HSBC","H   ":hn(e.h*360),Strt:e.s||0,Brgh:e.b||0};if("c"in e)return{_name:"",_classID:"CMYC","Cyn ":e.c||0,Mgnt:e.m||0,"Ylw ":e.y||0,Blck:e.k||0};if("l"in e)return{_name:"",_classID:"LABC",Lmnc:e.l||0,"A   ":e.a||0,"B   ":e.b||0};if("k"in e)return{_name:"",_classID:"GRYC","Gry ":e.k};throw new Error("Invalid color value")}else return{_name:"",_classID:"RGBC","Rd  ":0,"Grn ":0,"Bl  ":0}}function Vn(e){if(e===void 0)return 0;if(e.units!=="Angle")throw new Error(`Invalid units: ${e.units}`);return e.value}function _e(e){if(e===void 0)return 1;if(e.units!=="Percent")throw new Error(`Invalid units: ${e.units}`);return e.value/100}function Ha(e){if(e===void 0)return 1;if(e.units==="Percent")return e.value/100;if(e.units==="Angle")return e.value/360;throw new Error(`Invalid units: ${e.units}`)}function Je({units:e,value:n}){if(e!=="Pixels"&&e!=="Millimeters"&&e!=="Points"&&e!=="None"&&e!=="Picas"&&e!=="Inches"&&e!=="Centimeters"&&e!=="Density")throw new Error(`Invalid units: ${JSON.stringify({units:e,value:n})}`);return{value:n,units:e}}function Vu(e,n="Pixels"){return typeof e=="number"?{value:e,units:n}:Je(e)}function Gu({units:e,value:n},t){if(e!==t)throw new Error(`Invalid units: ${JSON.stringify({units:e,value:n})}`);return n}function hn(e){return{units:"Angle",value:e||0}}function ke(e){return{units:"Percent",value:Math.round((e||0)*100)}}function Zo(e){return{units:"Percent",value:(e||0)*100}}function ut(e,n){if(e==null)return{units:"Pixels",value:0};if(typeof e!="object")throw new Error(`Invalid value: ${JSON.stringify(e)} (key: ${n}) (should have value and units)`);let{units:t,value:i}=e;if(typeof i!="number")throw new Error(`Invalid value in ${JSON.stringify(e)} (key: ${n})`);if(t!=="Pixels"&&t!=="Millimeters"&&t!=="Points"&&t!=="None"&&t!=="Picas"&&t!=="Inches"&&t!=="Centimeters"&&t!=="Density")throw new Error(`Invalid units in ${JSON.stringify(e)} (key: ${n})`);return{units:t,value:i}}function Hu({numerator:e,denominator:n}){return{numerator:e,denominator:n}}k.textGridding=(0,R.createEnum)("textGridding","none",{none:"None",round:"Rnd "});k.Ornt=(0,R.createEnum)("Ornt","horizontal",{horizontal:"Hrzn",vertical:"Vrtc"});k.Annt=(0,R.createEnum)("Annt","sharp",{none:"Anno",sharp:"antiAliasSharp",crisp:"AnCr",strong:"AnSt",smooth:"AnSm",platform:"antiAliasPlatformGray",platformLCD:"antiAliasPlatformLCD"});k.warpStyle=(0,R.createEnum)("warpStyle","none",{none:"warpNone",arc:"warpArc",arcLower:"warpArcLower",arcUpper:"warpArcUpper",arch:"warpArch",bulge:"warpBulge",shellLower:"warpShellLower",shellUpper:"warpShellUpper",flag:"warpFlag",wave:"warpWave",fish:"warpFish",rise:"warpRise",fisheye:"warpFisheye",inflate:"warpInflate",squeeze:"warpSqueeze",twist:"warpTwist",cylinder:"warpCylinder",custom:"warpCustom"});k.BlnM=(0,R.createEnum)("BlnM","normal",{normal:"Nrml",dissolve:"Dslv",darken:"Drkn",multiply:"Mltp","color burn":"CBrn","linear burn":"linearBurn","darker color":"darkerColor",lighten:"Lghn",screen:"Scrn","color dodge":"CDdg","linear dodge":"linearDodge","lighter color":"lighterColor",overlay:"Ovrl","soft light":"SftL","hard light":"HrdL","vivid light":"vividLight","linear light":"linearLight","pin light":"pinLight","hard mix":"hardMix",difference:"Dfrn",exclusion:"Xclu",subtract:"blendSubtraction",divide:"blendDivide",hue:"H   ",saturation:"Strt",color:"Clr ",luminosity:"Lmns","linear height":"linearHeight",height:"Hght",subtraction:"Sbtr","pass through":"????"});k.BESl=(0,R.createEnum)("BESl","inner bevel",{"inner bevel":"InrB","outer bevel":"OtrB",emboss:"Embs","pillow emboss":"PlEb","stroke emboss":"strokeEmboss"});k.bvlT=(0,R.createEnum)("bvlT","smooth",{smooth:"SfBL","chisel hard":"PrBL","chisel soft":"Slmt"});k.BESs=(0,R.createEnum)("BESs","up",{up:"In  ",down:"Out "});k.BETE=(0,R.createEnum)("BETE","softer",{softer:"SfBL",precise:"PrBL"});k.IGSr=(0,R.createEnum)("IGSr","edge",{edge:"SrcE",center:"SrcC"});k.GrdT=(0,R.createEnum)("GrdT","linear",{linear:"Lnr ",radial:"Rdl ",angle:"Angl",reflected:"Rflc",diamond:"Dmnd"});k.animInterpStyleEnum=(0,R.createEnum)("animInterpStyle","linear",{linear:"Lnr ",hold:"hold"});k.stdTrackID=(0,R.createEnum)("stdTrackID","opacity",{opacity:"opacityTrack",style:"styleTrack",sheetTransform:"sheetTransformTrack",sheetPosition:"sheetPositionTrack",globalLighting:"globalLightingTrack"});k.gradientInterpolationMethodType=(0,R.createEnum)("gradientInterpolationMethodType","perceptual",{perceptual:"Perc",linear:"Lnr ",classic:"Gcls",smooth:"Smoo"});k.ClrS=(0,R.createEnum)("ClrS","rgb",{rgb:"RGBC",hsb:"HSBl",lab:"LbCl",hsl:"HSLC"});k.FStl=(0,R.createEnum)("FStl","outside",{outside:"OutF",center:"CtrF",inside:"InsF"});k.FrFl=(0,R.createEnum)("FrFl","color",{color:"SClr",gradient:"GrFl",pattern:"Ptrn"});k.ESliceType=(0,R.createEnum)("ESliceType","image",{image:"Img ",noImage:"noImage"});k.ESliceHorzAlign=(0,R.createEnum)("ESliceHorzAlign","default",{default:"default"});k.ESliceVertAlign=(0,R.createEnum)("ESliceVertAlign","default",{default:"default"});k.ESliceOrigin=(0,R.createEnum)("ESliceOrigin","userGenerated",{userGenerated:"userGenerated",autoGenerated:"autoGenerated",layer:"layer"});k.ESliceBGColorType=(0,R.createEnum)("ESliceBGColorType","none",{none:"None",matte:"matte",color:"Clr "});k.strokeStyleLineCapType=(0,R.createEnum)("strokeStyleLineCapType","butt",{butt:"strokeStyleButtCap",round:"strokeStyleRoundCap",square:"strokeStyleSquareCap"});k.strokeStyleLineJoinType=(0,R.createEnum)("strokeStyleLineJoinType","miter",{miter:"strokeStyleMiterJoin",round:"strokeStyleRoundJoin",bevel:"strokeStyleBevelJoin"});k.strokeStyleLineAlignment=(0,R.createEnum)("strokeStyleLineAlignment","inside",{inside:"strokeStyleAlignInside",center:"strokeStyleAlignCenter",outside:"strokeStyleAlignOutside"});k.BlrM=(0,R.createEnum)("BlrM","spin",{spin:"Spn ",zoom:"Zm  "});k.BlrQ=(0,R.createEnum)("BlrQ","good",{draft:"Drft",good:"Gd  ",best:"Bst "});k.SmBM=(0,R.createEnum)("SmBM","normal",{normal:"SBMN","edge only":"SBME","overlay edge":"SBMO"});k.SmBQ=(0,R.createEnum)("SmBQ","medium",{low:"SBQL",medium:"SBQM",high:"SBQH"});k.DspM=(0,R.createEnum)("DspM","stretch to fit",{"stretch to fit":"StrF",tile:"Tile"});k.UndA=(0,R.createEnum)("UndA","repeat edge pixels",{"wrap around":"WrpA","repeat edge pixels":"RptE"});k.Cnvr=(0,R.createEnum)("Cnvr","rectangular to polar",{"rectangular to polar":"RctP","polar to rectangular":"PlrR"});k.RplS=(0,R.createEnum)("RplS","medium",{small:"Sml ",medium:"Mdm ",large:"Lrg "});k.SphM=(0,R.createEnum)("SphM","normal",{normal:"Nrml","horizontal only":"HrzO","vertical only":"VrtO"});k.Wvtp=(0,R.createEnum)("Wvtp","sine",{sine:"WvSn",triangle:"WvTr",square:"WvSq"});k.ZZTy=(0,R.createEnum)("ZZTy","pond ripples",{"around center":"ArnC","out from center":"OtFr","pond ripples":"PndR"});k.Dstr=(0,R.createEnum)("Dstr","uniform",{uniform:"Unfr",gaussian:"Gsn "});k.Chnl=(0,R.createEnum)("Chnl","composite",{red:"Rd  ",green:"Grn ",blue:"Bl  ",composite:"Cmps"});k.MztT=(0,R.createEnum)("MztT","fine dots",{"fine dots":"FnDt","medium dots":"MdmD","grainy dots":"GrnD","coarse dots":"CrsD","short lines":"ShrL","medium lines":"MdmL","long lines":"LngL","short strokes":"ShSt","medium strokes":"MdmS","long strokes":"LngS"});k.Lns=(0,R.createEnum)("Lns ","50-300mm zoom",{"50-300mm zoom":"Zm  ","32mm prime":"Nkn ","105mm prime":"Nkn1","movie prime":"PnVs"});k.blurType=(0,R.createEnum)("blurType","gaussian blur",{"gaussian blur":"GsnB","lens blur":"lensBlur","motion blur":"MtnB"});k.DfsM=(0,R.createEnum)("DfsM","normal",{normal:"Nrml","darken only":"DrkO","lighten only":"LghO",anisotropic:"anisotropic"});k.ExtT=(0,R.createEnum)("ExtT","blocks",{blocks:"Blks",pyramids:"Pyrm"});k.ExtR=(0,R.createEnum)("ExtR","random",{random:"Rndm","level-based":"LvlB"});k.FlCl=(0,R.createEnum)("FlCl","background color",{"background color":"FlBc","foreground color":"FlFr","inverse image":"FlIn","unaltered image":"FlSm"});k.CntE=(0,R.createEnum)("CntE","upper",{lower:"Lwr ",upper:"Upr "});k.WndM=(0,R.createEnum)("WndM","wind",{wind:"Wnd ",blast:"Blst",stagger:"Stgr"});k.Drct=(0,R.createEnum)("Drct","right",{left:"Left",right:"Rght"});k.IntE=(0,R.createEnum)("IntE","odd lines",{"odd lines":"ElmO","even lines":"ElmE"});k.IntC=(0,R.createEnum)("IntC","interpolation",{duplication:"CrtD",interpolation:"CrtI"});k.FlMd=(0,R.createEnum)("FlMd","wrap around",{"set to transparent":"Bckg","repeat edge pixels":"Rpt ","wrap around":"Wrp "});k.prjM=(0,R.createEnum)("prjM","fisheye",{fisheye:"fisP",perspective:"perP",auto:"auto","full spherical":"fusP"});k.presetKindType=(0,R.createEnum)("presetKindType","custom",{custom:"presetKindCustom",default:"presetKindDefault"})});var Jo=ee(Pt=>{"use strict";Object.defineProperty(Pt,"__esModule",{value:!0});Pt.resourceHandlersMap=Pt.resourceHandlers=void 0;var Wu=Si(),D=Et(),O=pn(),Ie=At(),Ei=ka(),X=Ii();Pt.resourceHandlers=[];Pt.resourceHandlersMap={};function G(e,n,t,i){let o={key:e,has:n,read:t,write:i};Pt.resourceHandlers.push(o),Pt.resourceHandlersMap[o.key]=o}var Ze=!1,Fi=[void 0,"PPI","PPCM"],Di=[void 0,"Inches","Centimeters","Points","Picas","Columns"],Wa="0123456789abcdef";function $a(e){return e<=57?e-48:e>=97?e-87:e-55}function $u(e,n){return $a(e.charCodeAt(n))<<4|$a(e.charCodeAt(n+1))}function Ko(e,n){let t=(0,D.readBytes)(e,n);return(0,Ei.decodeString)(t)}function Yo(e,n){let t=(0,Ei.encodeString)(n);(0,O.writeBytes)(e,t)}function Zu(e){let n=(0,D.readUint8)(e),t=(0,D.readBytes)(e,n),i=!1;for(let o=0;o<t.byteLength;o++)if(t[o]&128){i=!0;break}if(i)try{return new TextDecoder("gbk").decode(t)}catch(o){}return(0,Ei.decodeString)(t)}function Xu(e,n){let t="";for(let o=0,r=n.codePointAt(o++);r!==void 0;r=n.codePointAt(o++))t+=r>127?"?":String.fromCodePoint(r);let i=(0,Ei.encodeString)(t);(0,O.writeUint8)(e,i.byteLength),(0,O.writeBytes)(e,i)}Ie.MOCK_HANDLERS&&G(1028,e=>e._ir1028!==void 0,(e,n,t)=>{Ze&&console.log("image resource 1028",t()),n._ir1028=(0,D.readBytes)(e,t())},(e,n)=>{(0,O.writeBytes)(e,n._ir1028)});G(1061,e=>e.captionDigest!==void 0,(e,n)=>{let t="";for(let i=0;i<16;i++){let o=(0,D.readUint8)(e);t+=Wa[o>>4],t+=Wa[o&15]}n.captionDigest=t},(e,n)=>{for(let t=0;t<16;t++)(0,O.writeUint8)(e,$u(n.captionDigest,t*2))});G(1060,e=>e.xmpMetadata!==void 0,(e,n,t)=>{n.xmpMetadata=Ko(e,t())},(e,n)=>{Yo(e,n.xmpMetadata)});var Oi=(0,Ie.createEnum)("Inte","perceptual",{perceptual:"Img ",saturation:"Grp ","relative colorimetric":"Clrm","absolute colorimetric":"AClr"});Ie.MOCK_HANDLERS&&G(1085,e=>e._ir1085!==void 0,(e,n,t)=>{n._ir1085=(0,D.readBytes)(e,t())},(e,n)=>{(0,O.writeBytes)(e,n._ir1085)});G(1082,e=>e.printInformation!==void 0,(e,n)=>{var t,i;let o=(0,X.readVersionAndDescriptor)(e);n.printInformation={printerName:o.printerName||"",renderingIntent:Oi.decode((t=o.Inte)!==null&&t!==void 0?t:"Inte.Img ")};let r=n.printInformation;o.PstS!==void 0&&(r.printerManagesColors=o.PstS),o["Nm  "]!==void 0&&(r.printerProfile=o["Nm  "]),o.MpBl!==void 0&&(r.blackPointCompensation=o.MpBl),o.printSixteenBit!==void 0&&(r.printSixteenBit=o.printSixteenBit),o.hardProof!==void 0&&(r.hardProof=o.hardProof),o.printProofSetup&&("Bltn"in o.printProofSetup?r.proofSetup={builtin:o.printProofSetup.Bltn.split(".")[1]}:r.proofSetup={profile:o.printProofSetup.profile,renderingIntent:Oi.decode((i=o.printProofSetup.Inte)!==null&&i!==void 0?i:"Inte.Img "),blackPointCompensation:!!o.printProofSetup.MpBl,paperWhite:!!o.printProofSetup.paperWhite})},(e,n)=>{var t,i;let o=n.printInformation,r={};o.printerManagesColors?r.PstS=!0:(o.hardProof!==void 0&&(r.hardProof=!!o.hardProof),r.ClrS="ClrS.RGBC",r["Nm  "]=(t=o.printerProfile)!==null&&t!==void 0?t:"CIE RGB"),r.Inte=Oi.encode(o.renderingIntent),o.printerManagesColors||(r.MpBl=!!o.blackPointCompensation),r.printSixteenBit=!!o.printSixteenBit,r.printerName=o.printerName||"",o.proofSetup&&"profile"in o.proofSetup?r.printProofSetup={profile:o.proofSetup.profile||"",Inte:Oi.encode(o.proofSetup.renderingIntent),MpBl:!!o.proofSetup.blackPointCompensation,paperWhite:!!o.proofSetup.paperWhite}:r.printProofSetup={Bltn:!((i=o.proofSetup)===null||i===void 0)&&i.builtin?`builtinProof.${o.proofSetup.builtin}`:"builtinProof.proofCMYK"},(0,X.writeVersionAndDescriptor)(e,"","printOutput",r)});Ie.MOCK_HANDLERS&&G(1083,e=>e._ir1083!==void 0,(e,n,t)=>{Ze&&console.log("image resource 1083",t()),n._ir1083=(0,D.readBytes)(e,t())},(e,n)=>{(0,O.writeBytes)(e,n._ir1083)});G(1005,e=>e.resolutionInfo!==void 0,(e,n)=>{let t=(0,D.readFixedPoint32)(e),i=(0,D.readUint16)(e),o=(0,D.readUint16)(e),r=(0,D.readFixedPoint32)(e),s=(0,D.readUint16)(e),a=(0,D.readUint16)(e);n.resolutionInfo={horizontalResolution:t,horizontalResolutionUnit:Fi[i]||"PPI",widthUnit:Di[o]||"Inches",verticalResolution:r,verticalResolutionUnit:Fi[s]||"PPI",heightUnit:Di[a]||"Inches"}},(e,n)=>{let t=n.resolutionInfo;(0,O.writeFixedPoint32)(e,t.horizontalResolution||0),(0,O.writeUint16)(e,Math.max(1,Fi.indexOf(t.horizontalResolutionUnit))),(0,O.writeUint16)(e,Math.max(1,Di.indexOf(t.widthUnit))),(0,O.writeFixedPoint32)(e,t.verticalResolution||0),(0,O.writeUint16)(e,Math.max(1,Fi.indexOf(t.verticalResolutionUnit))),(0,O.writeUint16)(e,Math.max(1,Di.indexOf(t.heightUnit)))});var Za=["centered","size to fit","user defined"];G(1062,e=>e.printScale!==void 0,(e,n)=>{n.printScale={style:Za[(0,D.readInt16)(e)],x:(0,D.readFloat32)(e),y:(0,D.readFloat32)(e),scale:(0,D.readFloat32)(e)}},(e,n)=>{let{style:t,x:i,y:o,scale:r}=n.printScale;(0,O.writeInt16)(e,Math.max(0,Za.indexOf(t))),(0,O.writeFloat32)(e,i||0),(0,O.writeFloat32)(e,o||0),(0,O.writeFloat32)(e,r||0)});G(1006,e=>e.alphaChannelNames!==void 0,(e,n,t)=>{if(n.alphaChannelNames)(0,D.skipBytes)(e,t());else for(n.alphaChannelNames=[];t()>0;){let i=Zu(e);n.alphaChannelNames.push(i)}},(e,n)=>{for(let t of n.alphaChannelNames)Xu(e,t)});G(1045,e=>e.alphaChannelNames!==void 0,(e,n,t)=>{for(n.alphaChannelNames=[];t()>0;)n.alphaChannelNames.push((0,D.readUnicodeString)(e))},(e,n)=>{for(let t of n.alphaChannelNames)(0,O.writeUnicodeStringWithPadding)(e,t)});Ie.MOCK_HANDLERS&&G(1077,e=>e._ir1077!==void 0,(e,n,t)=>{Ze&&console.log("image resource 1077",t()),n._ir1077=(0,D.readBytes)(e,t())},(e,n)=>{(0,O.writeBytes)(e,n._ir1077)});G(1053,e=>e.alphaIdentifiers!==void 0,(e,n,t)=>{for(n.alphaIdentifiers=[];t()>=4;)n.alphaIdentifiers.push((0,D.readUint32)(e))},(e,n)=>{for(let t of n.alphaIdentifiers)(0,O.writeUint32)(e,t)});G(1010,e=>e.backgroundColor!==void 0,(e,n)=>n.backgroundColor=(0,D.readColor)(e),(e,n)=>(0,O.writeColor)(e,n.backgroundColor));G(1037,e=>e.globalAngle!==void 0,(e,n)=>n.globalAngle=(0,D.readInt32)(e),(e,n)=>(0,O.writeInt32)(e,n.globalAngle));G(1049,e=>e.globalAltitude!==void 0,(e,n)=>n.globalAltitude=(0,D.readUint32)(e),(e,n)=>(0,O.writeUint32)(e,n.globalAltitude));G(1011,e=>e.printFlags!==void 0,(e,n)=>{n.printFlags={labels:!!(0,D.readUint8)(e),cropMarks:!!(0,D.readUint8)(e),colorBars:!!(0,D.readUint8)(e),registrationMarks:!!(0,D.readUint8)(e),negative:!!(0,D.readUint8)(e),flip:!!(0,D.readUint8)(e),interpolate:!!(0,D.readUint8)(e),caption:!!(0,D.readUint8)(e),printFlags:!!(0,D.readUint8)(e)}},(e,n)=>{let t=n.printFlags;(0,O.writeUint8)(e,t.labels?1:0),(0,O.writeUint8)(e,t.cropMarks?1:0),(0,O.writeUint8)(e,t.colorBars?1:0),(0,O.writeUint8)(e,t.registrationMarks?1:0),(0,O.writeUint8)(e,t.negative?1:0),(0,O.writeUint8)(e,t.flip?1:0),(0,O.writeUint8)(e,t.interpolate?1:0),(0,O.writeUint8)(e,t.caption?1:0),(0,O.writeUint8)(e,t.printFlags?1:0)});G(1034,e=>e.copyrighted!==void 0,(e,n)=>{n.copyrighted=!!(0,D.readUint8)(e)},(e,n)=>{(0,O.writeUint8)(e,n.copyrighted?1:0)});G(1035,e=>e.url!==void 0,(e,n,t)=>{n.url=(0,D.readAsciiString)(e,t())},(e,n)=>{(0,O.writeAsciiString)(e,n.url)});Ie.MOCK_HANDLERS&&G(1e4,e=>e._ir10000!==void 0,(e,n,t)=>{Ze&&console.log("image resource 10000",t()),n._ir10000=(0,D.readBytes)(e,t())},(e,n)=>{(0,O.writeBytes)(e,n._ir10000)});Ie.MOCK_HANDLERS&&G(1013,e=>e._ir1013!==void 0,(e,n,t)=>{Ze&&console.log("image resource 1013",t()),n._ir1013=(0,D.readBytes)(e,t())},(e,n)=>{(0,O.writeBytes)(e,n._ir1013)});Ie.MOCK_HANDLERS&&G(1016,e=>e._ir1016!==void 0,(e,n,t)=>{Ze&&console.log("image resource 1016",t()),n._ir1016=(0,D.readBytes)(e,t())},(e,n)=>{(0,O.writeBytes)(e,n._ir1016)});G(1080,e=>e.countInformation!==void 0,(e,n)=>{let t=(0,X.readVersionAndDescriptor)(e);n.countInformation=t.countGroupList.map(i=>({color:{r:i["Rd  "],g:i["Grn "],b:i["Bl  "]},name:i["Nm  "],size:i["Rds "],fontSize:i.fontSize,visible:i.Vsbl,points:i.countObjectList.map(o=>({x:o["X   "],y:o["Y   "]}))}))},(e,n)=>{let t={Vrsn:1,countGroupList:n.countInformation.map(i=>({"Rd  ":i.color.r,"Grn ":i.color.g,"Bl  ":i.color.b,"Nm  ":i.name,"Rds ":i.size,fontSize:i.fontSize,Vsbl:i.visible,countObjectList:i.points.map(o=>({"X   ":o.x,"Y   ":o.y}))}))};(0,X.writeVersionAndDescriptor)(e,"","Cnt ",t)});G(1024,e=>e.layerState!==void 0,(e,n)=>n.layerState=(0,D.readUint16)(e),(e,n)=>(0,O.writeUint16)(e,n.layerState));G(1026,e=>e.layersGroup!==void 0,(e,n,t)=>{for(n.layersGroup=[];t()>0;)n.layersGroup.push((0,D.readUint16)(e))},(e,n)=>{for(let t of n.layersGroup)(0,O.writeUint16)(e,t)});G(1072,e=>e.layerGroupsEnabledId!==void 0,(e,n,t)=>{for(n.layerGroupsEnabledId=[];t()>0;)n.layerGroupsEnabledId.push((0,D.readUint8)(e))},(e,n)=>{for(let t of n.layerGroupsEnabledId)(0,O.writeUint8)(e,t)});G(1069,e=>e.layerSelectionIds!==void 0,(e,n)=>{let t=(0,D.readUint16)(e);for(n.layerSelectionIds=[];t--;)n.layerSelectionIds.push((0,D.readUint32)(e))},(e,n)=>{(0,O.writeUint16)(e,n.layerSelectionIds.length);for(let t of n.layerSelectionIds)(0,O.writeUint32)(e,t)});G(1032,e=>e.gridAndGuidesInformation!==void 0,(e,n)=>{let t=(0,D.readUint32)(e),i=(0,D.readUint32)(e),o=(0,D.readUint32)(e),r=(0,D.readUint32)(e);if(t!==1)throw new Error(`Invalid 1032 resource version: ${t}`);n.gridAndGuidesInformation={grid:{horizontal:i,vertical:o},guides:[]};for(let s=0;s<r;s++)n.gridAndGuidesInformation.guides.push({location:(0,D.readUint32)(e)/32,direction:(0,D.readUint8)(e)?"horizontal":"vertical"})},(e,n)=>{let t=n.gridAndGuidesInformation,i=t.grid||{horizontal:576,vertical:576},o=t.guides||[];(0,O.writeUint32)(e,1),(0,O.writeUint32)(e,i.horizontal),(0,O.writeUint32)(e,i.vertical),(0,O.writeUint32)(e,o.length);for(let r of o)(0,O.writeUint32)(e,r.location*32),(0,O.writeUint8)(e,r.direction==="horizontal"?1:0)});G(1065,e=>e.layerComps!==void 0,(e,n)=>{let t=(0,X.readVersionAndDescriptor)(e,!0);n.layerComps={list:[]};for(let i of t.list)n.layerComps.list.push({id:i.compID,name:i["Nm  "],capturedInfo:i.capturedInfo}),"comment"in i&&(n.layerComps.list[n.layerComps.list.length-1].comment=i.comment);"lastAppliedComp"in t&&(n.layerComps.lastApplied=t.lastAppliedComp)},(e,n)=>{let t=n.layerComps,i={list:[]};for(let o of t.list){let r={};r._classID="Comp",r["Nm  "]=o.name,"comment"in o&&(r.comment=o.comment),r.compID=o.id,r.capturedInfo=o.capturedInfo,i.list.push(r)}"lastApplied"in t&&(i.lastAppliedComp=t.lastApplied),(0,X.writeVersionAndDescriptor)(e,"","CompList",i)});Ie.MOCK_HANDLERS&&G(1092,e=>e._ir1092!==void 0,(e,n,t)=>{Ze&&console.log("image resource 1092",t()),n._ir1092=(0,D.readBytes)(e,t())},(e,n)=>{(0,O.writeBytes)(e,n._ir1092)});var Xa=["normal",void 0,void 0,void 0,void 0,void 0,void 0,"multiply","screen",void 0,void 0,void 0,void 0,void 0,void 0,void 0,void 0,void 0,void 0,void 0,void 0,void 0,void 0,"difference"];G(1078,e=>e.onionSkins!==void 0,(e,n)=>{let t=(0,X.readVersionAndDescriptor)(e);n.onionSkins={enabled:t.enab,framesBefore:t.numBefore,framesAfter:t.numAfter,frameSpacing:t.Spcn,minOpacity:t.minOpacity/100,maxOpacity:t.maxOpacity/100,blendMode:Xa[t.BlnM]||"normal"}},(e,n)=>{let t=n.onionSkins,i={Vrsn:1,enab:t.enabled,numBefore:t.framesBefore,numAfter:t.framesAfter,Spcn:t.frameSpacing,minOpacity:t.minOpacity*100|0,maxOpacity:t.maxOpacity*100|0,BlnM:Math.max(0,Xa.indexOf(t.blendMode))};(0,X.writeVersionAndDescriptor)(e,"","null",i)});G(1075,e=>e.timelineInformation!==void 0,(e,n)=>{var t,i;let o=(0,X.readVersionAndDescriptor)(e);n.timelineInformation={enabled:o.enab,frameStep:(0,X.frac)(o.frameStep),frameRate:o.frameRate,time:(0,X.frac)(o.time),duration:(0,X.frac)(o.duration),workInTime:(0,X.frac)(o.workInTime),workOutTime:(0,X.frac)(o.workOutTime),repeats:o.LCnt,hasMotion:o.hasMotion,globalTracks:(0,X.parseTrackList)(o.globalTrackList,!!e.logMissingFeatures)},!((i=(t=o.audioClipGroupList)===null||t===void 0?void 0:t.audioClipGroupList)===null||i===void 0)&&i.length&&(n.timelineInformation.audioClipGroups=o.audioClipGroupList.audioClipGroupList.map(r=>({id:r.groupID,muted:r.muted,audioClips:r.audioClipList.map(({clipID:s,timeScope:a,muted:l,audioLevel:c,frameReader:d})=>({id:s,start:(0,X.frac)(a.Strt),duration:(0,X.frac)(a.duration),inTime:(0,X.frac)(a.inTime),outTime:(0,X.frac)(a.outTime),muted:l,audioLevel:c,frameReader:{type:d.frameReaderType,mediaDescriptor:d.mediaDescriptor,link:{name:d["Lnk "]["Nm  "],fullPath:d["Lnk "].fullPath,relativePath:d["Lnk "].relPath}}}))})))},(e,n)=>{var t;let i=n.timelineInformation,o={Vrsn:1,enab:i.enabled,frameStep:i.frameStep,frameRate:i.frameRate,time:i.time,duration:i.duration,workInTime:i.workInTime,workOutTime:i.workOutTime,LCnt:i.repeats,globalTrackList:(0,X.serializeTrackList)(i.globalTracks),audioClipGroupList:{audioClipGroupList:(t=i.audioClipGroups)===null||t===void 0?void 0:t.map(r=>({groupID:r.id,muted:r.muted,audioClipList:r.audioClips.map(s=>({clipID:s.id,timeScope:{Vrsn:1,Strt:s.start,duration:s.duration,inTime:s.inTime,outTime:s.outTime},frameReader:{frameReaderType:s.frameReader.type,descVersion:1,"Lnk ":{descVersion:1,"Nm  ":s.frameReader.link.name,fullPath:s.frameReader.link.fullPath,relPath:s.frameReader.link.relativePath},mediaDescriptor:s.frameReader.mediaDescriptor},muted:s.muted,audioLevel:s.audioLevel}))}))},hasMotion:i.hasMotion};(0,X.writeVersionAndDescriptor)(e,"","null",o,"anim")});G(1076,e=>e.sheetDisclosure!==void 0,(e,n)=>{let t=(0,X.readVersionAndDescriptor)(e);n.sheetDisclosure={},t.sheetTimelineOptions&&(n.sheetDisclosure.sheetTimelineOptions=t.sheetTimelineOptions.map(i=>({sheetID:i.sheetID,sheetDisclosed:i.sheetDisclosed,lightsDisclosed:i.lightsDisclosed,meshesDisclosed:i.meshesDisclosed,materialsDisclosed:i.materialsDisclosed})))},(e,n)=>{let t=n.sheetDisclosure,i={Vrsn:1};t.sheetTimelineOptions&&(i.sheetTimelineOptions=t.sheetTimelineOptions.map(o=>({Vrsn:2,sheetID:o.sheetID,sheetDisclosed:o.sheetDisclosed,lightsDisclosed:o.lightsDisclosed,meshesDisclosed:o.meshesDisclosed,materialsDisclosed:o.materialsDisclosed}))),(0,X.writeVersionAndDescriptor)(e,"","null",i)});G(1054,e=>e.urlsList!==void 0,(e,n)=>{let t=(0,D.readUint32)(e);n.urlsList=[];for(let i=0;i<t;i++){if((0,D.readSignature)(e)!=="slic"&&e.throwForMissingFeatures)throw new Error("Unknown long");let r=(0,D.readUint32)(e),s=(0,D.readUnicodeString)(e);n.urlsList.push({id:r,url:s,ref:"slice"})}},(e,n)=>{let t=n.urlsList;(0,O.writeUint32)(e,t.length);for(let i=0;i<t.length;i++)(0,O.writeSignature)(e,"slic"),(0,O.writeUint32)(e,t[i].id),(0,O.writeUnicodeString)(e,t[i].url)});function qa(e){return{"Top ":e.top,Left:e.left,Btom:e.bottom,Rght:e.right}}function Ka(e){return{top:e["Top "],left:e.Left,bottom:e.Btom,right:e.Rght}}function Ci(e,n){return e[Math.max(0,Math.min(e.length-1,n))]}var Ya=["autoGenerated","layer","userGenerated"],Ja=["noImage","image"],Ai=["default"];G(1050,e=>e.slices?e.slices.length:0,(e,n)=>{let t=(0,D.readUint32)(e);if(t===6){n.slices||(n.slices=[]);let i=(0,D.readInt32)(e),o=(0,D.readInt32)(e),r=(0,D.readInt32)(e),s=(0,D.readInt32)(e),a=(0,D.readUnicodeString)(e),l=(0,D.readUint32)(e);n.slices.push({bounds:{top:i,left:o,bottom:r,right:s},groupName:a,slices:[]});let c=n.slices[n.slices.length-1].slices;for(let h=0;h<l;h++){let f=(0,D.readUint32)(e),u=(0,D.readUint32)(e),p=Ci(Ya,(0,D.readUint32)(e)),_=p=="layer"?(0,D.readUint32)(e):0,b=(0,D.readUnicodeString)(e),y=Ci(Ja,(0,D.readUint32)(e)),S=(0,D.readInt32)(e),x=(0,D.readInt32)(e),v=(0,D.readInt32)(e),F=(0,D.readInt32)(e),C=(0,D.readUnicodeString)(e),I=(0,D.readUnicodeString)(e),E=(0,D.readUnicodeString)(e),L=(0,D.readUnicodeString)(e),M=!!(0,D.readUint8)(e),j=(0,D.readUnicodeString)(e),he=Ci(Ai,(0,D.readUint32)(e)),we=Ci(Ai,(0,D.readUint32)(e)),me=(0,D.readUint8)(e),$=(0,D.readUint8)(e),ne=(0,D.readUint8)(e),pe=(0,D.readUint8)(e),Le=me+$+ne+pe===0?"none":me===0?"matte":"color";c.push({id:f,groupId:u,origin:p,associatedLayerId:_,name:b,target:I,message:E,altTag:L,cellTextIsHTML:M,cellText:j,horizontalAlignment:he,verticalAlignment:we,type:y,url:C,bounds:{top:x,left:S,bottom:F,right:v},backgroundColorType:Le,backgroundColor:{r:$,g:ne,b:pe,a:me}})}(0,X.readVersionAndDescriptor)(e).slices.forEach(h=>{let f=c.find(u=>h.sliceID==u.id);f&&(f.topOutset=h.topOutset,f.leftOutset=h.leftOutset,f.bottomOutset=h.bottomOutset,f.rightOutset=h.rightOutset)})}else if(t===7||t===8){let i=(0,X.readVersionAndDescriptor)(e);n.slices||(n.slices=[]),n.slices.push({groupName:i.baseName,bounds:Ka(i.bounds),slices:i.slices.map(o=>Object.assign(Object.assign({},o["Nm  "]?{name:o["Nm  "]}:{}),{id:o.sliceID,groupId:o.groupID,associatedLayerId:0,origin:X.ESliceOrigin.decode(o.origin),type:X.ESliceType.decode(o.Type),bounds:Ka(o.bounds),url:o.url,target:o.null,message:o.Msge,altTag:o.altTag,cellTextIsHTML:o.cellTextIsHTML,cellText:o.cellText,horizontalAlignment:X.ESliceHorzAlign.decode(o.horzAlign),verticalAlignment:X.ESliceVertAlign.decode(o.vertAlign),backgroundColorType:X.ESliceBGColorType.decode(o.bgColorType),backgroundColor:o.bgColor?{r:o.bgColor["Rd  "],g:o.bgColor["Grn "],b:o.bgColor["Bl  "],a:o.bgColor.alpha}:{r:0,g:0,b:0,a:0},topOutset:o.topOutset||0,leftOutset:o.leftOutset||0,bottomOutset:o.bottomOutset||0,rightOutset:o.rightOutset||0}))})}else throw new Error(`Invalid slices version (${t})`)},(e,n,t)=>{let{bounds:i,groupName:o,slices:r}=n.slices[t];(0,O.writeUint32)(e,6),(0,O.writeInt32)(e,i.top),(0,O.writeInt32)(e,i.left),(0,O.writeInt32)(e,i.bottom),(0,O.writeInt32)(e,i.right),(0,O.writeUnicodeString)(e,o),(0,O.writeUint32)(e,r.length);for(let a=0;a<r.length;a++){let l=r[a],{a:c,r:d,g:h,b:f}=l.backgroundColor;l.backgroundColorType==="none"?c=d=h=f=0:l.backgroundColorType==="matte"&&(c=0,d=h=f=255),(0,O.writeUint32)(e,l.id),(0,O.writeUint32)(e,l.groupId),(0,O.writeUint32)(e,Ya.indexOf(l.origin)),l.origin==="layer"&&(0,O.writeUint32)(e,l.associatedLayerId),(0,O.writeUnicodeString)(e,l.name||""),(0,O.writeUint32)(e,Ja.indexOf(l.type)),(0,O.writeInt32)(e,l.bounds.left),(0,O.writeInt32)(e,l.bounds.top),(0,O.writeInt32)(e,l.bounds.right),(0,O.writeInt32)(e,l.bounds.bottom),(0,O.writeUnicodeString)(e,l.url),(0,O.writeUnicodeString)(e,l.target),(0,O.writeUnicodeString)(e,l.message),(0,O.writeUnicodeString)(e,l.altTag),(0,O.writeUint8)(e,l.cellTextIsHTML?1:0),(0,O.writeUnicodeString)(e,l.cellText),(0,O.writeUint32)(e,Ai.indexOf(l.horizontalAlignment)),(0,O.writeUint32)(e,Ai.indexOf(l.verticalAlignment)),(0,O.writeUint8)(e,c),(0,O.writeUint8)(e,d),(0,O.writeUint8)(e,h),(0,O.writeUint8)(e,f)}let s={bounds:qa(i),slices:[]};r.forEach(a=>{let l=Object.assign(Object.assign({sliceID:a.id,groupID:a.groupId,origin:X.ESliceOrigin.encode(a.origin),Type:X.ESliceType.encode(a.type),bounds:qa(a.bounds)},a.name?{"Nm  ":a.name}:{}),{url:a.url,null:a.target,Msge:a.message,altTag:a.altTag,cellTextIsHTML:a.cellTextIsHTML,cellText:a.cellText,horzAlign:X.ESliceHorzAlign.encode(a.horizontalAlignment),vertAlign:X.ESliceVertAlign.encode(a.verticalAlignment),bgColorType:X.ESliceBGColorType.encode(a.backgroundColorType)});if(a.backgroundColorType==="color"){let{r:c,g:d,b:h,a:f}=a.backgroundColor;l.bgColor={"Rd  ":c,"Grn ":d,"Bl  ":h,alpha:f}}l.topOutset=a.topOutset||0,l.leftOutset=a.leftOutset||0,l.bottomOutset=a.bottomOutset||0,l.rightOutset=a.rightOutset||0,s.slices.push(l)}),(0,X.writeVersionAndDescriptor)(e,"","null",s,"slices")});G(1064,e=>e.pixelAspectRatio!==void 0,(e,n)=>{if((0,D.readUint32)(e)>2)throw new Error("Invalid pixelAspectRatio version");n.pixelAspectRatio={aspect:(0,D.readFloat64)(e)}},(e,n)=>{(0,O.writeUint32)(e,2),(0,O.writeFloat64)(e,n.pixelAspectRatio.aspect)});G(1041,e=>e.iccUntaggedProfile!==void 0,(e,n)=>{n.iccUntaggedProfile=!!(0,D.readUint8)(e)},(e,n)=>{(0,O.writeUint8)(e,n.iccUntaggedProfile?1:0)});Ie.MOCK_HANDLERS&&G(1039,e=>e._ir1039!==void 0,(e,n,t)=>{Ze&&console.log("image resource 1039",t()),n._ir1039=(0,D.readBytes)(e,t())},(e,n)=>{(0,O.writeBytes)(e,n._ir1039)});G(1044,e=>e.idsSeedNumber!==void 0,(e,n)=>n.idsSeedNumber=(0,D.readUint32)(e),(e,n)=>(0,O.writeUint32)(e,n.idsSeedNumber));G(1036,e=>e.thumbnail!==void 0||e.thumbnailRaw!==void 0,(e,n,t)=>{let i=(0,D.readUint32)(e),o=(0,D.readUint32)(e),r=(0,D.readUint32)(e);(0,D.readUint32)(e),(0,D.readUint32)(e),(0,D.readUint32)(e);let s=(0,D.readUint16)(e),a=(0,D.readUint16)(e);if(i!==1||s!==24||a!==1){e.logMissingFeatures&&e.log(`Invalid thumbnail data (format: ${i}, bitsPerPixel: ${s}, planes: ${a})`),(0,D.skipBytes)(e,t());return}let l=t(),c=(0,D.readBytes)(e,l);e.useRawThumbnail?n.thumbnailRaw={width:o,height:r,data:c}:c.byteLength&&(n.thumbnail=(0,Ie.createCanvasFromData)(c))},(e,n)=>{var t;let i=0,o=0,r=new Uint8Array(0);if(n.thumbnailRaw)i=n.thumbnailRaw.width,o=n.thumbnailRaw.height,r=n.thumbnailRaw.data;else try{let h=(t=n.thumbnail.toDataURL("image/jpeg",1))===null||t===void 0?void 0:t.substring(23);h&&(r=(0,Wu.toByteArray)(h),i=n.thumbnail.width,o=n.thumbnail.height)}catch(h){}let s=24,a=Math.floor((i*s+31)/32)*4,l=1,c=a*o*l,d=r.length;(0,O.writeUint32)(e,1),(0,O.writeUint32)(e,i),(0,O.writeUint32)(e,o),(0,O.writeUint32)(e,a),(0,O.writeUint32)(e,c),(0,O.writeUint32)(e,d),(0,O.writeUint16)(e,s),(0,O.writeUint16)(e,l),(0,O.writeBytes)(e,r)});G(1057,e=>e.versionInfo!==void 0,(e,n,t)=>{if((0,D.readUint32)(e)!==1)throw new Error("Invalid versionInfo version");n.versionInfo={hasRealMergedData:!!(0,D.readUint8)(e),writerName:(0,D.readUnicodeString)(e),readerName:(0,D.readUnicodeString)(e),fileVersion:(0,D.readUint32)(e)},(0,D.skipBytes)(e,t())},(e,n)=>{let t=n.versionInfo;(0,O.writeUint32)(e,1),(0,O.writeUint8)(e,t.hasRealMergedData?1:0),(0,O.writeUnicodeString)(e,t.writerName),(0,O.writeUnicodeString)(e,t.readerName),(0,O.writeUint32)(e,t.fileVersion)});Ie.MOCK_HANDLERS&&G(1058,e=>e._ir1058!==void 0,(e,n,t)=>{Ze&&console.log("image resource 1058",t()),n._ir1058=(0,D.readBytes)(e,t())},(e,n)=>{(0,O.writeBytes)(e,n._ir1058)});G(7e3,e=>e.imageReadyVariables!==void 0,(e,n,t)=>{n.imageReadyVariables=Ko(e,t())},(e,n)=>{Yo(e,n.imageReadyVariables)});G(7001,e=>e.imageReadyDataSets!==void 0,(e,n,t)=>{n.imageReadyDataSets=Ko(e,t())},(e,n)=>{Yo(e,n.imageReadyDataSets)});G(1088,e=>e.pathSelectionState!==void 0,(e,n,t)=>{let i=(0,X.readVersionAndDescriptor)(e);n.pathSelectionState=i.null},(e,n)=>{let t={null:n.pathSelectionState};(0,X.writeVersionAndDescriptor)(e,"","null",t)});Ie.MOCK_HANDLERS&&G(1025,e=>e._ir1025!==void 0,(e,n,t)=>{Ze&&console.log("image resource 1025",t()),n._ir1025=(0,D.readBytes)(e,t())},(e,n)=>{(0,O.writeBytes)(e,n._ir1025)});var Qa=(0,Ie.createEnum)("FrmD","auto",{auto:"Auto",none:"None",dispose:"Disp"});G(4e3,e=>e.animations!==void 0,(e,n,t)=>{let i=(0,D.readSignature)(e);if(i==="mani")(0,D.checkSignature)(e,"IRFR"),(0,D.readSection)(e,1,o=>{for(;o()>0;){(0,D.checkSignature)(e,"8BIM");let r=(0,D.readSignature)(e);(0,D.readSection)(e,1,s=>{if(r==="AnDs"){let a=(0,X.readVersionAndDescriptor)(e);n.animations={frames:a.FrIn.map(l=>({id:l.FrID,delay:(l.FrDl||0)/100,dispose:l.FrDs?Qa.decode(l.FrDs):"auto"})),animations:a.FSts.map(l=>({id:l.FsID,frames:l.FsFr,repeats:l.LCnt,activeFrame:l.AFrm||0}))}}else if(r==="Roll"){let a=(0,D.readBytes)(e,s());e.logDevFeatures&&e.log("#4000 Roll",a)}else e.logMissingFeatures&&e.log("Unhandled subsection in #4000",r)})}});else if(i==="mopt"){let o=(0,D.readBytes)(e,t());e.logDevFeatures&&e.log("#4000 mopt",o)}else e.logMissingFeatures&&e.log("Unhandled key in #4000:",i)},(e,n)=>{n.animations&&((0,O.writeSignature)(e,"mani"),(0,O.writeSignature)(e,"IRFR"),(0,O.writeSection)(e,1,()=>{(0,O.writeSignature)(e,"8BIM"),(0,O.writeSignature)(e,"AnDs"),(0,O.writeSection)(e,1,()=>{let t={FrIn:[],FSts:[]};for(let i=0;i<n.animations.frames.length;i++){let o=n.animations.frames[i],r={FrID:o.id};o.delay&&(r.FrDl=o.delay*100|0),r.FrDs=Qa.encode(o.dispose),t.FrIn.push(r)}for(let i=0;i<n.animations.animations.length;i++){let o=n.animations.animations[i],r={FsID:o.id,AFrm:o.activeFrame|0,FsFr:o.frames,LCnt:o.repeats|0};t.FSts.push(r)}(0,X.writeVersionAndDescriptor)(e,"","null",t)})}))});Ie.MOCK_HANDLERS&&G(4001,e=>e._ir4001!==void 0,(e,n,t)=>{if(Ie.MOCK_HANDLERS){Ze&&console.log("image resource 4001",t()),n._ir4001=(0,D.readBytes)(e,t());return}let i=(0,D.readSignature)(e);if(i==="mfri"){if((0,D.readUint32)(e)!==2)throw new Error("Invalid mfri version");let r=(0,D.readUint32)(e),s=(0,D.readBytes)(e,r);e.logDevFeatures&&e.log("mfri",s)}else if(i==="mset"){let o=(0,X.readVersionAndDescriptor)(e);e.logDevFeatures&&e.log("mset",o)}else e.logMissingFeatures&&e.log("Unhandled key in #4001",i)},(e,n)=>{(0,O.writeBytes)(e,n._ir4001)});Ie.MOCK_HANDLERS&&G(4002,e=>e._ir4002!==void 0,(e,n,t)=>{Ze&&console.log("image resource 4002",t()),n._ir4002=(0,D.readBytes)(e,t())},(e,n)=>{(0,O.writeBytes)(e,n._ir4002)})});var Et=ee(N=>{"use strict";var qu=N&&N.__rest||function(e,n){var t={};for(var i in e)Object.prototype.hasOwnProperty.call(e,i)&&n.indexOf(i)<0&&(t[i]=e[i]);if(e!=null&&typeof Object.getOwnPropertySymbols=="function")for(var o=0,i=Object.getOwnPropertySymbols(e);o<i.length;o++)n.indexOf(i[o])<0&&Object.prototype.propertyIsEnumerable.call(e,i[o])&&(t[i[o]]=e[i[o]]);return t};Object.defineProperty(N,"__esModule",{value:!0});N.supportedColorModes=void 0;N.createReader=Ti;N.warnOrThrow=Li;N.readUint8=fe;N.peekUint8=il;N.readInt16=Lt;N.readUint16=te;N.readUint16LE=ol;N.readInt32=Pe;N.readInt32LE=e0;N.readUint32=ce;N.readFloat32=t0;N.readFloat64=tr;N.readFixedPoint32=n0;N.readFixedPointPath32=i0;N.readBytes=ht;N.readSignature=Gn;N.validSignatureAt=rl;N.readPascalString=Bi;N.readUnicodeString=sl;N.readUnicodeStringWithLength=al;N.readUnicodeStringWithLengthLE=o0;N.readAsciiString=r0;N.skipBytes=be;N.checkSignature=sr;N.readPsd=a0;N.readLayerInfo=cl;N.getCompositeImageData=dl;N.getCompositeCanvas=u0;N.getLayerImageData=fl;N.getLayerMaskImageData=ul;N.getLayerRealMaskImageData=hl;N.getLayerCanvas=h0;N.getLayerMaskCanvas=p0;N.getLayerRealMaskCanvas=g0;N.decodeLayerPixels=m0;N.readGlobalLayerMaskInfo=gl;N.readAdditionalLayerInfo=ar;N.readDataZip=rr;N.readDataRLE=Ut;N.readSection=Qe;N.readColor=_0;N.readPattern=x0;var Ku=No(),Fe=At(),Yu=ji(),Ju=Jo();N.supportedColorModes=[0,1,3,2];var Qu=["bitmap","grayscale","indexed","RGB","CMYK","","","multichannel","duotone","lab"];function Ui(e){let n=e.width*e.height*4;for(let t=0;t<n;t+=4){let i=e.data[t];e.data[t+1]=i,e.data[t+2]=i}}function Ti(e,n,t){return{view:new DataView(e,n,t),offset:0,strict:!1,debug:!1,large:!1,globalAlpha:!1,log:console.log}}function Li(e,n){if(e.strict)throw new Error(n);e.debug&&e.log(n)}function fe(e){return e.offset+=1,e.view.getUint8(e.offset-1)}function il(e){return e.view.getUint8(e.offset)}function Lt(e){return e.offset+=2,e.view.getInt16(e.offset-2,!1)}function te(e){return e.offset+=2,e.view.getUint16(e.offset-2,!1)}function ol(e){return e.offset+=2,e.view.getUint16(e.offset-2,!0)}function Pe(e){return e.offset+=4,e.view.getInt32(e.offset-4,!1)}function e0(e){return e.offset+=4,e.view.getInt32(e.offset-4,!0)}function ce(e){return e.offset+=4,e.view.getUint32(e.offset-4,!1)}function t0(e){return e.offset+=4,e.view.getFloat32(e.offset-4,!1)}function tr(e){return e.offset+=8,e.view.getFloat64(e.offset-8,!1)}function n0(e){return Pe(e)/65536}function i0(e){return Pe(e)/(1<<24)}function ht(e,n){let t=e.view.byteOffset+e.offset;if(e.offset+=n,t+n>e.view.buffer.byteLength){if(Li(e,"Reading bytes exceeding buffer length"),n>100*1024*1024)throw new Error("Reading past end of file");let i=new Uint8Array(n),o=Math.min(n,e.view.byteLength-t);return o>0&&i.set(new Uint8Array(e.view.buffer,t,o)),i}else return new Uint8Array(e.view.buffer,t,n)}function Gn(e){return ll(e,4)}function rl(e,n){let t=String.fromCharCode(e.view.getUint8(n))+String.fromCharCode(e.view.getUint8(n+1))+String.fromCharCode(e.view.getUint8(n+2))+String.fromCharCode(e.view.getUint8(n+3));return t=="8BIM"||t=="8B64"}function Bi(e,n){let t=fe(e),i=t?ll(e,t):"";for(;++t%n;)e.offset++;return i}function sl(e){let n=ce(e);return al(e,n)}function al(e,n){let t="";for(;n--;){let i=te(e);(i||n>0)&&(t+=String.fromCharCode(i))}return t}function o0(e,n){let t="";for(;n--;){let i=ol(e);(i||n>0)&&(t+=String.fromCharCode(i))}return t}function r0(e,n){let t="";for(;n--;)t+=String.fromCharCode(fe(e));return t}function be(e,n){e.offset+=n}function sr(e,n,t){let i=e.offset,o=Gn(e);if(o!==n&&o!==t)throw new Error(`Invalid signature: \'${o}\' at 0x${i.toString(16)}`)}function ll(e,n){let t=ht(e,n),i="";for(let o=0;o<t.length;o++)i+=String.fromCharCode(t[o]);return i}function s0(e){return e==="8BIM"||e==="MeSa"||e==="AgHg"||e==="PHUT"||e==="DCSR"}function a0(e,n={}){var t;sr(e,"8BPS");let i=te(e);if(i!==1&&i!==2)throw new Error(`Invalid PSD file version: ${i}`);be(e,6);let o=te(e),r=ce(e),s=ce(e),a=te(e),l=te(e),c=i===1?3e4:3e5;if(s>c||r>c)throw new Error(`Invalid size: ${s}x${r}`);if(o>16)throw new Error(`Invalid channel count: ${o}`);if(![1,8,16,32].includes(a))throw new Error(`Invalid bitsPerChannel: ${a}`);if(N.supportedColorModes.indexOf(l)===-1)throw new Error(`Color mode not supported: ${(t=Qu[l])!==null&&t!==void 0?t:l}`);let d={width:s,height:r,channels:o,bitsPerChannel:a,colorMode:l};Object.assign(e,n),e.large=i===2,e.globalAlpha=!1,"totalMemoryLimit"in e||(e.totalMemoryLimit=2*1024*1024*1024),Qe(e,1,y=>{if(y()){if(l===2){if(y()!=768)throw new Error("Invalid color palette size");d.palette=[];for(let S=0;S<256;S++)d.palette.push({r:fe(e),g:0,b:0});for(let S=0;S<256;S++)d.palette[S].g=fe(e);for(let S=0;S<256;S++)d.palette[S].b=fe(e)}be(e,y())}});let h={};Qe(e,1,y=>{for(;y()>0;){ml(e,s0);let S=te(e);Bi(e,2),Qe(e,2,x=>{let v=Ju.resourceHandlersMap[S],F=S===1036&&!!e.skipThumbnail;if(v&&!F)try{v.read(e,h,x)}catch(C){if(e.throwForMissingFeatures)throw C;be(e,x())}else be(e,x())})}});let{layersGroup:f,layerGroupsEnabledId:u}=h,p=qu(h,["layersGroup","layerGroupsEnabledId"]);Object.keys(p).length&&(d.imageResources=p),Qe(e,1,y=>{if(Qe(e,2,S=>{cl(e,d,h),be(e,S())},void 0,e.large),y()>0){let S=gl(e);S&&(d.globalLayerMaskInfo=S)}else be(e,y());for(;y()>0;){for(;y()&&il(e)===0;)be(e,1);y()>=12?ar(e,d,d,h):be(e,y())}},void 0,e.large);let _=d.children&&d.children.length;if(!(e.skipCompositeImageData&&(e.skipLayerImageData||_)))if(e.useRawData)d.rawCompositeData=new Uint8Array(e.view.buffer,e.view.byteOffset+e.offset);else{let y=bl(e,d);e.useImageData?d.imageData=y:d.canvas=(0,Fe.imageDataToCanvas)(y)}return d}function cl(e,n,t){var i,o;let{layersGroup:r=[],layerGroupsEnabledId:s=[]}=t,a=Lt(e);a<0&&(e.globalAlpha=!0,a=-a);let l=[],c=[];for(let h=0;h<a;h++){let{layer:f,channels:u}=l0(e,n,t);r[h]!==void 0&&(f.linkGroup=r[h]),s[h]!==void 0&&(f.linkGroupEnabled=!!s[h]),l.push(f),c.push(u)}for(let h=0;h<a;h++)f0(e,n,l[h],c[h]);n.children||(n.children=[]);let d=[n];for(let h=l.length-1;h>=0;h--){let f=l[h],u=f.sectionDivider?f.sectionDivider.type:0;u===1||u===2?(f.opened=u===1,f.children=[],!((i=f.sectionDivider)===null||i===void 0)&&i.key&&(f.blendMode=(o=Fe.toBlendMode[f.sectionDivider.key])!==null&&o!==void 0?o:f.blendMode),d[d.length-1].children.unshift(f),d.push(f)):u===3?d.pop():d[d.length-1].children.unshift(f)}}function l0(e,n,t){let i={};if(i.top=Pe(e),i.left=Pe(e),i.bottom=Pe(e),i.right=Pe(e),!nr(i,e))throw new Error("Invalid layer size");let o=te(e),r=[];for(let l=0;l<o;l++){let c=Lt(e),d=ce(e);if(e.large){if(d!==0)throw new Error("Sizes larger than 4GB are not supported");d=ce(e)}r.push({id:c,length:d})}sr(e,"8BIM");let s=Gn(e);if(!Fe.toBlendMode[s])throw new Error(`Invalid blend mode: \'${s}\'`);i.blendMode=Fe.toBlendMode[s],i.opacity=fe(e)/255,i.clipping=fe(e)===1;let a=fe(e);return i.transparencyProtected=(a&1)!==0,i.hidden=(a&2)!==0,a&32&&(i.effectsOpen=!0),be(e,1),Qe(e,1,l=>{c0(e,i);let c=d0(e);for(c&&(i.blendingRanges=c),i.name=Bi(e,1);l()>4&&!rl(e,e.offset);)e.offset++;for(;l()>=12;)ar(e,i,n,t);be(e,l())}),{layer:i,channels:r}}function nr(e,n){let t=(e.right||0)-(e.left||0),i=(e.bottom||0)-(e.top||0),o=n.large?3e5:3e4;return t>=0&&i>=0&&t<=o&&i<=o}function c0(e,n){return Qe(e,1,t=>{if(!t())return;let i={};if(n.mask=i,i.top=Pe(e),i.left=Pe(e),i.bottom=Pe(e),i.right=Pe(e),!nr(i,e))throw new Error("Invalid mask size");i.defaultColor=fe(e);let o=fe(e);if(i.positionRelativeToLayer=(o&1)!==0,i.disabled=(o&2)!==0,i.fromVectorData=(o&8)!==0,t()>=18){let r={};n.realMask=r;let s=fe(e);if(r.positionRelativeToLayer=(s&1)!==0,r.disabled=(s&2)!==0,r.fromVectorData=(s&8)!==0,r.defaultColor=fe(e),r.top=Pe(e),r.left=Pe(e),r.bottom=Pe(e),r.right=Pe(e),!nr(r,e))throw new Error("Invalid realMask size")}if(o&16){let r=fe(e);r&1&&(i.userMaskDensity=fe(e)/255),r&2&&(i.userMaskFeather=tr(e)),r&4&&(i.vectorMaskDensity=fe(e)/255),r&8&&(i.vectorMaskFeather=tr(e))}be(e,t())})}function Pi(e){return[fe(e),fe(e),fe(e),fe(e)]}function d0(e){return Qe(e,1,n=>{let t=Pi(e),i=Pi(e),o=[];for(;n()>0;){let r=Pi(e),s=Pi(e);o.push({sourceRange:r,destRange:s})}return{compositeGrayBlendSource:t,compositeGraphBlendDestinationRange:i,ranges:o}})}function f0(e,n,t,i){if(e.skipLayerImageData)return;let{colorMode:o=3,bitsPerChannel:r=8}=n;t.rawData={colorMode:o,bitsPerChannel:r,channels:[],large:e.large};for(let s of i){let a=e.offset,l=0,c;if(s.length===1)throw new Error("Invalid channel length");if(s.length){if(l=te(e),l>3&&(e.offset-=1,l=te(e)),l>3&&(e.offset-=3,l=te(e)),l>3)throw new Error(`Invalid compression: ${l}`);s.length>2&&(c=ht(e,s.length-2))}e.offset=a+s.length,t.rawData.channels.push({id:s.id,compression:l,data:c})}e.useRawData||pl(t,e)}function el({data:e},n){let t=e instanceof Float32Array?1:e instanceof Uint16Array?65535:255,i=(n?4:3)|0,o=e.length|0,r=(n?5:4)|0;for(let s=i;s<o;s=s+r|0)e[s]=t}function dl(e){let n=e.rawCompositeData;if(!n)return;let t=Ti(n.buffer,n.byteOffset,n.byteLength);return bl(t,e)}function u0(e){return Ri(dl(e))}function fl(e){return gn(e,Ne.Layer,!1,void 0)}function ul(e){return gn(e,Ne.Mask,!1,void 0)}function hl(e){return gn(e,Ne.RealMask,!1,void 0)}function h0(e){return Ri(fl(e))}function p0(e){return Ri(ul(e))}function g0(e){return Ri(hl(e))}function Ri(e){return e&&(0,Fe.imageDataToCanvas)(e)}function Qo(e,n,t){n&&(t?e.imageData=n:e.canvas=(0,Fe.imageDataToCanvas)(n))}function m0(e,n){pl(e,{useImageData:n})}function pl(e,n){var t,i,o;let{throwForMissingFeatures:r,useImageData:s}=n,a=gn(e,Ne.Layer,r,n.totalMemoryLimit);if(Qo(e,a,s),n.totalMemoryLimit!==void 0&&(n.totalMemoryLimit-=(t=a==null?void 0:a.data.byteLength)!==null&&t!==void 0?t:0),e.mask){let l=gn(e,Ne.Mask,r,n.totalMemoryLimit);Qo(e.mask,l,s),n.totalMemoryLimit!==void 0&&(n.totalMemoryLimit-=(i=l==null?void 0:l.data.byteLength)!==null&&i!==void 0?i:0)}if(e.realMask){let l=gn(e,Ne.RealMask,r,n.totalMemoryLimit);Qo(e.realMask,l,s),n.totalMemoryLimit!==void 0&&(n.totalMemoryLimit-=(o=l==null?void 0:l.data.byteLength)!==null&&o!==void 0?o:0)}delete e.rawData}var Ne;(function(e){e[e.Layer=0]="Layer",e[e.Mask=1]="Mask",e[e.RealMask=2]="RealMask"})(Ne||(Ne={}));function gn(e,n,t,i){if(!e.rawData)return;let{colorMode:o,bitsPerChannel:r,channels:s,large:a}=e.rawData,l=Math.max(0,(e.right||0)-(e.left||0)),c=Math.max(0,(e.bottom||0)-(e.top||0)),d=o===4,h,f,u=!1;if(l&&c&&n===Ne.Layer)if(d){if(r!==8)throw new Error("bitsPerChannel Not supproted");h={width:l,height:c,data:new Uint8ClampedArray(l*c*5)}}else h=ir(l,c,r,4,i);Fe.RAW_IMAGE_DATA&&(e.imageDataRaw=[],e.imageDataRawCompression=[]);for(let{id:p,compression:_,data:b}of s){if(!b)continue;let y=Ti(b.buffer,b.byteOffset,b.byteLength);if(p===-2||p===-3){if(p===-2&&n!==Ne.Mask||p===-3&&n!==Ne.RealMask)continue;let S=p===-2?e.mask:e.realMask;if(!S)throw new Error(`Missing layer ${p===-2?"mask":"real mask"} data`);let x=Math.max(0,(S.right||0)-(S.left||0)),v=Math.max(0,(S.bottom||0)-(S.top||0));x&&v&&(f=ir(x,v,r,4,i),tl(y,b.byteLength,f,_,x,v,r,0,a,4),Fe.RAW_IMAGE_DATA&&(p===-2?(e.maskDataRawCompression=_,e.maskDataRaw=b):(e.realMaskDataRawCompression=_,e.realMaskDataRaw=b)),Ui(f),el(f,!1))}else{if(n!==Ne.Layer)continue;let S=(0,Fe.offsetForChannel)(p,d),x=h;if(S<0&&(x=void 0,t))throw new Error(`Channel not supported: ${p}`);tl(y,b.byteLength,x,_,l,c,r,S,a,d?5:4),Fe.RAW_IMAGE_DATA&&(e.imageDataRawCompression[p]=_,e.imageDataRaw[p]=b),x&&o===1&&Ui(x)}p===-1&&(u=!0)}if(h&&(u||el(h,d),d)){let p=h;h=(0,Fe.createImageData)(p.width,p.height),yl(p,h,!1)}return n===Ne.Layer?h:f}function tl(e,n,t,i,o,r,s,a,l,c){if(n)if(i===0){n!==o*r*Math.floor(s/8)&&e.log(`Invalid length (${n}, ${o*r*Math.floor(s/8)})`);let d=ht(e,n);Sl(d,t,s,c,a)}else if(i===1)Ut(e,t,o,r,s,c,[a],l);else if(i===2){let d=ht(e,n);rr(d,t,o,r,s,c,a,!1)}else if(i===3){let d=ht(e,n);rr(d,t,o,r,s,c,a,!0)}else throw new Error(`Invalid Compression type: ${i}`)}function gl(e){return Qe(e,1,n=>{if(!n())return;let t=te(e),i=te(e),o=te(e),r=te(e),s=te(e),a=te(e)/255,l=fe(e);return be(e,n()),{overlayColorSpace:t,colorSpace1:i,colorSpace2:o,colorSpace3:r,colorSpace4:s,opacity:a,kind:l}})}var b0=[0,1,-1,2,-2,3,-3,4,-4];function ml(e,n){let t=e.offset,i="";for(let o of b0){try{e.offset=t+o,i=Gn(e)}catch(r){}if(n(i))break}if(!n(i))throw new Error(`Invalid signature: \'${i}\' at 0x${t.toString(16)}`);return i}function y0(e){return e==="8BIM"||e==="8B64"}function ar(e,n,t,i){let o=ml(e,y0),r=Gn(e),s=o==="8B64"||e.large&&Fe.largeAdditionalInfoKeys.indexOf(r)!==-1;Qe(e,2,a=>{let l=Yu.infoHandlersMap[r];if(l)try{l.read(e,n,a,t,i)}catch(c){if(e.throwForMissingFeatures)throw c}else e.logMissingFeatures&&e.log(`Unhandled additional info: ${r}`),be(e,a());a()&&(e.logMissingFeatures&&e.log(`Unread ${a()} bytes left for additional info: ${r}`),be(e,a()))},!1,s)}function ir(e,n,t,i,o){let r=e*n*i*Math.max(1,t/8);if(o!==void 0&&r>o)throw new Error("Exceeded memory limit");if(t===1||t===8)return i===4?(0,Fe.createImageData)(e,n):{width:e,height:n,data:new Uint8ClampedArray(e*n*i)};if(t===16)return{width:e,height:n,data:new Uint16Array(e*n*i)};if(t===32)return{width:e,height:n,data:new Float32Array(e*n*i)};throw new Error(`Invalid bitDepth (${t})`)}function bl(e,n){var t;let i=te(e),o=(t=n.bitsPerChannel)!==null&&t!==void 0?t:8;if(N.supportedColorModes.indexOf(n.colorMode)===-1)throw new Error(`Color mode not supported: ${n.colorMode}`);if(i!==0&&i!==1)throw new Error(`Compression type not supported: ${i}`);let r=ir(n.width,n.height,o,4,e.totalMemoryLimit);switch(e.totalMemoryLimit!==void 0&&(e.totalMemoryLimit-=r.data.byteLength),(0,Fe.resetImageData)(r),n.colorMode){case 0:{if(o!==1)throw new Error("Invalid bitsPerChannel for bitmap color mode");let s;if(i===0)s=ht(e,Math.ceil(n.width/8)*n.height);else if(i===1)s=new Uint8Array(n.width*n.height),Ut(e,{data:s,width:n.width,height:n.height},n.width,n.height,8,1,[0],e.large);else throw new Error(`Compression not supported: ${i}`);(0,Fe.decodeBitmap)(s,r.data,n.width,n.height);break}case 3:case 1:{let s=n.colorMode===1?[0]:[0,1,2];if(n.channels&&n.channels>3)for(let a=3;a<n.channels;a++)s.push(a);else e.globalAlpha&&s.push(3);if(i===0)for(let a=0;a<s.length;a++){let l=ht(e,n.width*n.height*Math.floor(o/8));Sl(l,r,o,4,s[a])}else if(i===1){let a=e.offset;Ut(e,r,n.width,n.height,o,4,s,e.large),Fe.RAW_IMAGE_DATA&&(n.imageDataRaw=new Uint8Array(e.view.buffer,e.view.byteOffset+a,e.offset-a))}else throw new Error(`Compression not supported: ${i}`);n.colorMode===1&&Ui(r);break}case 2:{if(o!==8)throw new Error("bitsPerChannel Not supproted");if(n.channels!==1)throw new Error("Invalid channel count");if(!n.palette)throw new Error("Missing color palette");if(i===0)throw new Error(`Compression not supported: ${i}`);if(i===1){let s={width:r.width,height:r.height,data:new Uint8Array(r.width*r.height)};Ut(e,s,n.width,n.height,o,1,[0],e.large),w0(s,r,n.palette)}else throw new Error(`Compression not supported: ${i}`);break}case 4:{if(o!==8)throw new Error("bitsPerChannel Not supproted");if(n.channels!==4)throw new Error("Invalid channel count");let s=[0,1,2,3];if(e.globalAlpha&&s.push(4),i===0)throw new Error(`Compression not supported: ${i}`);if(i===1){let a={width:r.width,height:r.height,data:new Uint8Array(r.width*r.height*5)},l=e.offset;Ut(e,a,n.width,n.height,o,5,s,e.large),yl(a,r,!0),Fe.RAW_IMAGE_DATA&&(n.imageDataRaw=new Uint8Array(e.view.buffer,e.view.byteOffset+l,e.offset-l))}else throw new Error(`Compression not supported: ${i}`);break}default:throw new Error(`Color mode not supported: ${n.colorMode}`)}if(e.globalAlpha){if(n.bitsPerChannel!==8)throw new Error("bitsPerChannel Not supproted");let s=r.data,a=r.width*r.height*4;for(let l=0;l<a;l+=4){let c=s[l+3];if(c!=0&&c!=255){let h=1/(c/255),f=255*(1-h);s[l+0]=s[l+0]*h+f,s[l+1]=s[l+1]*h+f,s[l+2]=s[l+2]*h+f}}}return r}function yl(e,n,t){let i=n.width*n.height*4,o=e.data,r=n.data;for(let s=0,a=0;a<i;s+=5,a+=4){let l=o[s],c=o[s+1],d=o[s+2],h=o[s+3];r[a]=(l*h|0)/255|0,r[a+1]=(c*h|0)/255|0,r[a+2]=(d*h|0)/255|0,r[a+3]=t?255-o[s+4]:o[s+4]}}function w0(e,n,t){let i=e.width*e.height,o=e.data,r=n.data;for(let s=0,a=0;s<i;s++,a+=4){let l=t[o[s]];r[a+0]=l.r,r[a+1]=l.g,r[a+2]=l.b,r[a+3]=255}}function S0(e,n){if(e.byteLength/e.length!==n.byteLength/n.length)throw new Error("Invalid array types")}function wl(e,n){if(n===8)return e;if(n===16){for(let t=0;t<e.byteLength;t+=2){let i=e[t];e[t]=e[t+1],e[t+1]=i}if(e.byteOffset%2){let t=new Uint16Array(e.byteLength/2);return new Uint8Array(t.buffer,t.byteOffset,t.byteLength).set(e),t}else return new Uint16Array(e.buffer,e.byteOffset,e.byteLength/2)}else if(n===32)if(e.byteOffset%4){let t=new Float32Array(e.byteLength/4);return new Uint8Array(t.buffer,t.byteOffset,t.byteLength).set(e),t}else return new Float32Array(e.buffer,e.byteOffset,e.byteLength/4);else throw new Error(`Invalid bitDepth (${n})`)}function or(e,n,t,i){S0(e.data,n);let o=e.width*e.height,r=e.data;for(let s=0,a=t|0;s<o;s++,a=a+i|0)r[a]=n[s]}function Sl(e,n,t,i,o){if(t==32)for(let s=0;s<e.byteLength;s+=4){let a=e[s+0],l=e[s+1],c=e[s+2],d=e[s+3];e[s+0]=d,e[s+1]=c,e[s+2]=l,e[s+3]=a}let r=wl(e,t);n&&o<i&&or(n,r,o,i)}function er(e,n,t,i){for(let o=0;o<t;o++){let r=o*n;for(let s=1,a=r+1;s<n;s++,a++)e[a]=(e[a-1]+e[a])%i}}function rr(e,n,t,i,o,r,s,a){let l=(0,Ku.inflate)(e);if(n&&s<r){let c=wl(l,o);if(o===8)a&&er(l,t,i,256),or(n,l,s,r);else if(o===16)a&&er(c,t,i,65536),or(n,c,s,r);else if(o===32){a&&er(l,t*4,i,256);let d=s,h=new Uint32Array(n.data.buffer,n.data.byteOffset,n.data.length);for(let f=0;f<i;f++){let u=t*4*f;for(let p=0;p<t;p++,u++,d+=r){let _=u+t,b=_+t,y=b+t;h[d]=(l[u]<<24|l[_]<<16|l[b]<<8|l[y])>>>0}}}else throw new Error("Invalid bitDepth")}}function Ut(e,n,t,i,o,r,s,a){let l=n&&n.data,c;if(a){Mi(e,s.length*i*4),c=new Uint32Array(s.length*i);for(let h=0,f=0;h<s.length;h++)for(let u=0;u<i;u++,f++)c[f]=ce(e)}else{Mi(e,s.length*i*2),c=new Uint16Array(s.length*i);for(let h=0,f=0;h<s.length;h++)for(let u=0;u<i;u++,f++)c[f]=te(e)}let d=r-1|0;for(let h=0,f=0;h<s.length;h++){let u=s[h]|0,p=h>d||u>d;if(!l||p)for(let _=0;_<i;_++,f++)be(e,c[f]);else for(let _=0,b=u|0;_<i;_++,f++){let y=c[f],S=ht(e,y);for(let x=0,v=0;x<y;x++){let F=S[x];if(F>128){let C=S[++x];F=256-F|0;for(let I=0;I<=F&&v<t;I=I+1|0,v=v+1|0)l[b]=C,b=b+r|0}else if(F<128)for(let C=0;C<=F&&v<t;C=C+1|0,v=v+1|0)l[b]=S[++x],b=b+r|0}}}_l(e,c.byteLength)}function Qe(e,n,t,i=!0,o=!1){let r=ce(e);if(o){if(r!==0)throw new Error("Sizes larger than 4GB are not supported");r=ce(e)}if(r<=0&&i)return;let s=e.offset+r;if(s>e.view.byteLength)throw new Error("Section exceeds file size");let a=t(()=>s-e.offset);for(e.offset!==s&&(e.offset>s?Li(e,"Exceeded section limits"):Li(e,"Unread section data"));r%n;)r++,s++;return e.offset=s,a}function _0(e){switch(te(e)){case 0:{let t=te(e)/257,i=te(e)/257,o=te(e)/257;return be(e,2),{r:t,g:i,b:o}}case 1:{let t=te(e)/65535,i=te(e)/65535,o=te(e)/65535;return be(e,2),{h:t,s:i,b:o}}case 2:{let t=te(e)/257,i=te(e)/257,o=te(e)/257,r=te(e)/257;return{c:t,m:i,y:o,k:r}}case 7:{let t=Lt(e)/1e4,i=Lt(e),o=Lt(e),r=i<0?i/12800:i/12700,s=o<0?o/12800:o/12700;return be(e,2),{l:t,a:r,b:s}}case 8:{let t=te(e)*255/1e4;return be(e,6),{k:t}}default:throw new Error("Invalid color space")}}function x0(e){let n=ce(e);for(;n%4;)n++;let t=e.offset+n,i=ce(e);if(i!==1)throw new Error(`Invalid pattern version: ${i}`);let o=ce(e),r=Lt(e),s=Lt(e);if(o!==3&&o!==1&&o!==2)throw new Error(`Unsupported pattern color mode: ${o}`);let a=sl(e),l=Bi(e,1),c=[];if(o===2){for(let v=0;v<256;v++)c.push({r:fe(e),g:fe(e),b:fe(e)});be(e,4)}let d=ce(e);if(d!==3)throw new Error(`Invalid pattern VMAL version: ${d}`);ce(e);let h=ce(e),f=ce(e),u=ce(e),p=ce(e),_=ce(e),b=p-f,y=u-h,S=b*y*4;Mi(e,S);let x=new Uint8Array(S);for(let v=3;v<x.byteLength;v+=4)x[v]=255;for(let v=0,F=0;v<_+2;v++){if(!ce(e))continue;let I=ce(e),E=ce(e),L=ce(e),M=ce(e),j=ce(e),he=ce(e),we=te(e),me=fe(e),$=I-23,ne=ht(e,$);if(E!==8||we!==8)throw new Error("16bit pixel depth not supported for patterns");let pe=he-M,Le=j-L,tt=M-f,z=L-h;if(me===0){if(o===3&&F<3)for(let T=0;T<Le;T++)for(let H=0;H<pe;H++){let de=H+T*pe,ie=(tt+H+(T+z)*b)*4;x[ie+F]=ne[de]}else if(o===1&&F<1)for(let T=0;T<Le;T++)for(let H=0;H<pe;H++){let de=H+T*pe,ie=(tt+H+(T+z)*b)*4,ge=ne[de];x[ie+0]=ge,x[ie+1]=ge,x[ie+2]=ge}else if(o===2)for(let T=0;T<Le;T++)for(let H=0;H<pe;H++){let de=H+T*pe,ie=(tt+H+(T+z)*b)*4,ge=ne[de],xe=c[ge];x[ie+0]=xe.r,x[ie+1]=xe.g,x[ie+2]=xe.b}else if(e.throwForMissingFeatures)throw new Error("Invalid color pattern")}else if(me===1){Mi(e,pe*Le);let T={data:x,width:b,height:y},H={data:new Uint8Array(pe*Le),width:pe,height:Le},de=Ti(ne.buffer,ne.byteOffset,ne.byteLength);if(o===3&&F<3&&(Ut(de,H,pe,Le,8,1,[0],!1),nl(H,T,tt,z,F)),o===1&&F<1&&(Ut(de,H,pe,Le,8,1,[0],!1),nl(H,T,tt,z,0),Ui(T)),o===2)throw new Error("Indexed pattern color mode not implemented");_l(e,pe*Le)}else throw new Error("Invalid pattern compression mode");F++}return e.offset=t,{id:l,name:a,x:r,y:s,bounds:{x:f,y:h,w:b,h:y},data:x}}function nl(e,n,t,i,o){let r=e.width,s=e.height,a=n.width;for(let l=0;l<s;l++)for(let c=0;c<r;c++){let d=c+l*r,h=(t+c+(l+i)*a)*4,f=e.data[d];n.data[h+o]=f}}function Mi(e,n){if(e.totalMemoryLimit!==void 0){if(e.totalMemoryLimit<n)throw new Error("Exceeded memory limit");e.totalMemoryLimit-=n}}function _l(e,n){e.totalMemoryLimit!==void 0&&(e.totalMemoryLimit+=n)}});var Il=ee(zi=>{"use strict";Object.defineProperty(zi,"__esModule",{value:!0});zi.readEffects=v0;zi.writeEffects=k0;var vl=At(),B=Et(),U=pn(),kl=[void 0,"outer bevel","inner bevel","emboss","pillow emboss","stroke emboss"];function mn(e){return(0,B.checkSignature)(e,"8BIM"),vl.toBlendMode[(0,B.readSignature)(e)]||"normal"}function yn(e,n){(0,U.writeSignature)(e,"8BIM"),(0,U.writeSignature)(e,vl.fromBlendMode[n]||"norm")}function bn(e){return(0,B.readUint8)(e)/255}function wn(e,n){(0,U.writeUint8)(e,Math.round(n*255)|0)}function v0(e){let n=(0,B.readUint16)(e);if(n!==0)throw new Error(`Invalid effects layer version: ${n}`);let t=(0,B.readUint16)(e),i={};for(let o=0;o<t;o++){(0,B.checkSignature)(e,"8BIM");let r=(0,B.readSignature)(e);switch(r){case"cmnS":{let s=(0,B.readUint32)(e),a=(0,B.readUint32)(e),l=!!(0,B.readUint8)(e);if((0,B.skipBytes)(e,2),s!==7||a!==0||!l)throw new Error("Invalid effects common state");break}case"dsdw":case"isdw":{let s=(0,B.readUint32)(e),a=(0,B.readUint32)(e);if(s!==41&&s!==51)throw new Error(`Invalid shadow size: ${s}`);if(a!==0&&a!==2)throw new Error(`Invalid shadow version: ${a}`);let l=(0,B.readFixedPoint32)(e);(0,B.readFixedPoint32)(e);let c=(0,B.readFixedPoint32)(e),d=(0,B.readFixedPoint32)(e),h=(0,B.readColor)(e),f=mn(e),u=!!(0,B.readUint8)(e),p=!!(0,B.readUint8)(e),_=bn(e);s>=51&&(0,B.readColor)(e);let b={size:{units:"Pixels",value:l},distance:{units:"Pixels",value:d},angle:c,color:h,blendMode:f,enabled:u,useGlobalLight:p,opacity:_};r==="dsdw"?i.dropShadow=[b]:i.innerShadow=[b];break}case"oglw":{let s=(0,B.readUint32)(e),a=(0,B.readUint32)(e);if(s!==32&&s!==42)throw new Error(`Invalid outer glow size: ${s}`);if(a!==0&&a!==2)throw new Error(`Invalid outer glow version: ${a}`);let l=(0,B.readFixedPoint32)(e);(0,B.readFixedPoint32)(e);let c=(0,B.readColor)(e),d=mn(e),h=!!(0,B.readUint8)(e),f=bn(e);s>=42&&(0,B.readColor)(e),i.outerGlow={size:{units:"Pixels",value:l},color:c,blendMode:d,enabled:h,opacity:f};break}case"iglw":{let s=(0,B.readUint32)(e),a=(0,B.readUint32)(e);if(s!==32&&s!==43)throw new Error(`Invalid inner glow size: ${s}`);if(a!==0&&a!==2)throw new Error(`Invalid inner glow version: ${a}`);let l=(0,B.readFixedPoint32)(e);(0,B.readFixedPoint32)(e);let c=(0,B.readColor)(e),d=mn(e),h=!!(0,B.readUint8)(e),f=bn(e);s>=43&&((0,B.readUint8)(e),(0,B.readColor)(e)),i.innerGlow={size:{units:"Pixels",value:l},color:c,blendMode:d,enabled:h,opacity:f};break}case"bevl":{let s=(0,B.readUint32)(e),a=(0,B.readUint32)(e);if(s!==58&&s!==78)throw new Error(`Invalid bevel size: ${s}`);if(a!==0&&a!==2)throw new Error(`Invalid bevel version: ${a}`);let l=(0,B.readFixedPoint32)(e),c=(0,B.readFixedPoint32)(e),d=(0,B.readFixedPoint32)(e),h=mn(e),f=mn(e),u=(0,B.readColor)(e),p=(0,B.readColor)(e),_=kl[(0,B.readUint8)(e)]||"inner bevel",b=bn(e),y=bn(e),S=!!(0,B.readUint8)(e),x=!!(0,B.readUint8)(e),v=(0,B.readUint8)(e)?"down":"up";s>=78&&((0,B.readColor)(e),(0,B.readColor)(e)),i.bevel={size:{units:"Pixels",value:d},angle:l,strength:c,highlightBlendMode:h,shadowBlendMode:f,highlightColor:u,shadowColor:p,style:_,highlightOpacity:b,shadowOpacity:y,enabled:S,useGlobalLight:x,direction:v};break}case"sofi":{let s=(0,B.readUint32)(e),a=(0,B.readUint32)(e);if(s!==34)throw new Error(`Invalid effects solid fill info size: ${s}`);if(a!==2)throw new Error(`Invalid effects solid fill info version: ${a}`);let l=mn(e),c=(0,B.readColor)(e),d=bn(e),h=!!(0,B.readUint8)(e);(0,B.readColor)(e),i.solidFill=[{blendMode:l,color:c,opacity:d,enabled:h}];break}default:throw new Error(`Invalid effect type: \'${r}\'`)}}return i}function xl(e,n){var t;(0,U.writeUint32)(e,51),(0,U.writeUint32)(e,2),(0,U.writeFixedPoint32)(e,n.size&&n.size.value||0),(0,U.writeFixedPoint32)(e,0),(0,U.writeFixedPoint32)(e,n.angle||0),(0,U.writeFixedPoint32)(e,n.distance&&n.distance.value||0),(0,U.writeColor)(e,n.color),yn(e,n.blendMode),(0,U.writeUint8)(e,n.enabled?1:0),(0,U.writeUint8)(e,n.useGlobalLight?1:0),wn(e,(t=n.opacity)!==null&&t!==void 0?t:1),(0,U.writeColor)(e,n.color)}function k0(e,n){var t,i,o,r,s,a;let l=(t=n.dropShadow)===null||t===void 0?void 0:t[0],c=(i=n.innerShadow)===null||i===void 0?void 0:i[0],d=n.outerGlow,h=n.innerGlow,f=n.bevel,u=(o=n.solidFill)===null||o===void 0?void 0:o[0],p=1;if(l&&p++,c&&p++,d&&p++,h&&p++,f&&p++,u&&p++,(0,U.writeUint16)(e,0),(0,U.writeUint16)(e,p),(0,U.writeSignature)(e,"8BIM"),(0,U.writeSignature)(e,"cmnS"),(0,U.writeUint32)(e,7),(0,U.writeUint32)(e,0),(0,U.writeUint8)(e,1),(0,U.writeZeros)(e,2),l&&((0,U.writeSignature)(e,"8BIM"),(0,U.writeSignature)(e,"dsdw"),xl(e,l)),c&&((0,U.writeSignature)(e,"8BIM"),(0,U.writeSignature)(e,"isdw"),xl(e,c)),d&&((0,U.writeSignature)(e,"8BIM"),(0,U.writeSignature)(e,"oglw"),(0,U.writeUint32)(e,42),(0,U.writeUint32)(e,2),(0,U.writeFixedPoint32)(e,((r=d.size)===null||r===void 0?void 0:r.value)||0),(0,U.writeFixedPoint32)(e,0),(0,U.writeColor)(e,d.color),yn(e,d.blendMode),(0,U.writeUint8)(e,d.enabled?1:0),wn(e,d.opacity||0),(0,U.writeColor)(e,d.color)),h&&((0,U.writeSignature)(e,"8BIM"),(0,U.writeSignature)(e,"iglw"),(0,U.writeUint32)(e,43),(0,U.writeUint32)(e,2),(0,U.writeFixedPoint32)(e,((s=h.size)===null||s===void 0?void 0:s.value)||0),(0,U.writeFixedPoint32)(e,0),(0,U.writeColor)(e,h.color),yn(e,h.blendMode),(0,U.writeUint8)(e,h.enabled?1:0),wn(e,h.opacity||0),(0,U.writeUint8)(e,0),(0,U.writeColor)(e,h.color)),f){(0,U.writeSignature)(e,"8BIM"),(0,U.writeSignature)(e,"bevl"),(0,U.writeUint32)(e,78),(0,U.writeUint32)(e,2),(0,U.writeFixedPoint32)(e,f.angle||0),(0,U.writeFixedPoint32)(e,f.strength||0),(0,U.writeFixedPoint32)(e,((a=f.size)===null||a===void 0?void 0:a.value)||0),yn(e,f.highlightBlendMode),yn(e,f.shadowBlendMode),(0,U.writeColor)(e,f.highlightColor),(0,U.writeColor)(e,f.shadowColor);let _=kl.indexOf(f.style);(0,U.writeUint8)(e,_<=0?1:_),wn(e,f.highlightOpacity||0),wn(e,f.shadowOpacity||0),(0,U.writeUint8)(e,f.enabled?1:0),(0,U.writeUint8)(e,f.useGlobalLight?1:0),(0,U.writeUint8)(e,f.direction==="down"?1:0),(0,U.writeColor)(e,f.highlightColor),(0,U.writeColor)(e,f.shadowColor)}u&&((0,U.writeSignature)(e,"8BIM"),(0,U.writeSignature)(e,"sofi"),(0,U.writeUint32)(e,34),(0,U.writeUint32)(e,2),yn(e,u.blendMode),(0,U.writeColor)(e,u.color),wn(e,u.opacity||0),(0,U.writeUint8)(e,u.enabled?1:0),(0,U.writeColor)(e,u.color))}});var Ol=ee(Ni=>{"use strict";Object.defineProperty(Ni,"__esModule",{value:!0});Ni.parseEngineData=I0;Ni.serializeEngineData=O0;function Fl(e){return e===32||e===10||e===13||e===9}function Dl(e){return e>=48&&e<=57||e===46||e===45}function I0(e){let n=0;function t(){for(;n<e.length&&Fl(e[n]);)n++}function i(){let f=e[n];return n++,f===92&&(f=e[n],n++),f}function o(){let f="";if(e[n]===41)return n++,f;if(e[n]!==254||e[n+1]!==255)throw new Error("Invalid utf-16 BOM");for(n+=2;n<e.length&&e[n]!==41;){let u=i(),p=i(),_=u<<8|p;f+=String.fromCharCode(_)}return n++,f}let r=null,s=[];function a(f){s.length?(l(f),s.push(f)):(s.push(f),r=f)}function l(f){if(!s.length)throw new Error("Invalid data");let u=s[s.length-1];if(typeof u=="string")s[s.length-2][u]=f,d();else if(Array.isArray(u))u.push(f);else throw new Error("Invalid data")}function c(f){s.length||a({});let u=s[s.length-1];if(u&&typeof u=="string")l(f==="nil"?null:`/${f}`);else if(u&&typeof u=="object")s.push(f);else throw new Error("Invalid data")}function d(){if(!s.length)throw new Error("Invalid data");s.pop()}t();let h=e.length;for(;h>0&&e[h-1]===0;)h--;for(;n<h;){let f=n,u=e[f];if(u===60&&e[f+1]===60)n+=2,a({});else if(u===62&&e[f+1]===62)n+=2,d();else if(u===47){n+=1;let p=n;for(;n<e.length&&!Fl(e[n]);)n++;let _="";for(let b=p;b<n;b++)_+=String.fromCharCode(e[b]);c(_)}else if(u===40)n+=1,l(o());else if(u===91)n+=1,a([]);else if(u===93)n+=1,d();else if(u===110&&e[f+1]===117&&e[f+2]===108&&e[f+3]===108)n+=4,l(null);else if(u===116&&e[f+1]===114&&e[f+2]===117&&e[f+3]===101)n+=4,l(!0);else if(u===102&&e[f+1]===97&&e[f+2]===108&&e[f+3]===115&&e[f+4]===101)n+=5,l(!1);else if(Dl(u)){let p="";for(;n<e.length&&Dl(e[n]);)p+=String.fromCharCode(e[n]),n++;l(parseFloat(p))}else n+=1,console.log(`Invalid token \'${String.fromCharCode(u)}\' (${u}) at ${n}`);t()}return r}var F0=["Axis","XY","Zone","WordSpacing","FirstLineIndent","GlyphSpacing","StartIndent","EndIndent","SpaceBefore","SpaceAfter","LetterSpacing","Values","GridSize","GridLeading","PointBase","BoxBounds","TransformPoint0","TransformPoint1","TransformPoint2","FontSize","Leading","HorizontalScale","VerticalScale","BaselineShift","Tsume","OutlineWidth","AutoLeading"],D0=["RunLengthArray"];function O0(e,n=!1){let t=new Uint8Array(1024),i=0,o=0;function r(_){if(i>=t.length){let b=new Uint8Array(t.length*2);b.set(t),t=b}t[i]=_,i++}function s(_){for(let b=0;b<_.length;b++)r(_.charCodeAt(b))}function a(){if(n)s(" ");else for(let _=0;_<o;_++)s("	")}function l(_,b){a(),s(`/${_}`),p(b,_,!0),n||s(`\n`)}function c(_){return _.toString()}function d(_){return _.toFixed(5).replace(/(\\d)0+$/g,"$1").replace(/^0+\\.([1-9])/g,".$1").replace(/^-0+\\.0(\\d)/g,"-.0$1")}function h(_,b){return b&&F0.indexOf(b)!==-1||(_|0)!==_?d(_):c(_)}function f(_){let b=Object.keys(_);return b.indexOf("98")!==-1&&b.unshift(...b.splice(b.indexOf("98"),1)),b.indexOf("99")!==-1&&b.unshift(...b.splice(b.indexOf("99"),1)),b}function u(_){(_===40||_===41||_===92)&&r(92),r(_)}function p(_,b,y=!1){function S(){y?s(" "):a()}if(_===null)S(),s(n?"/nil":"null");else if(typeof _=="number")S(),s(h(_,b));else if(typeof _=="boolean")S(),s(_?"true":"false");else if(typeof _=="string")if(S(),(b==="99"||b==="98")&&_.charAt(0)==="/")s(_);else{s("("),r(254),r(255);for(let x=0;x<_.length;x++){let v=_.charCodeAt(x);u(v>>8&255),u(v&255)}s(")")}else if(Array.isArray(_))if(S(),_.every(x=>typeof x=="number")){s("[");let x=D0.indexOf(b)!==-1;for(let v of _)s(" "),s(x?h(v):d(v));s(" ]")}else{s("["),n||s(`\n`);for(let x of _)p(x,b),n||s(`\n`);a(),s("]")}else if(typeof _=="object"){y&&!n&&s(`\n`),a(),s("<<"),n||s(`\n`),o++;for(let x of f(_))l(x,_[x]);o--,a(),s(">>")}}if(n){if(typeof e=="object")for(let _ of f(e))l(_,e[_])}else s(`\n\n`),p(e);return t.slice(0,i)}});var Rl=ee(Hi=>{"use strict";Object.defineProperty(Hi,"__esModule",{value:!0});Hi.decodeEngineData=M0;Hi.encodeEngineData=T0;var Pl={name:"MyriadPro-Regular",script:0,type:0,synthetic:0},Vi={justification:"left",firstLineIndent:0,startIndent:0,endIndent:0,spaceBefore:0,spaceAfter:0,autoHyphenate:!0,hyphenatedWordSize:6,preHyphen:2,postHyphen:2,consecutiveHyphens:8,zone:36,wordSpacing:[.8,1,1.33],letterSpacing:[0,0,0],glyphSpacing:[1,1,1],autoLeading:1.2,leadingType:0,hanging:!1,burasagari:!1,kinsokuOrder:0,everyLineComposer:!1},C0={font:Pl,fontSize:12,fauxBold:!1,fauxItalic:!1,autoLeading:!0,leading:0,horizontalScale:1,verticalScale:1,tracking:0,autoKerning:!0,kerning:0,baselineShift:0,fontCaps:0,fontBaseline:0,underline:!1,strikethrough:!1,ligatures:!0,dLigatures:!1,baselineDirection:2,tsume:0,styleRunAlignment:2,language:0,noBreak:!1,fillColor:{r:0,g:0,b:0},strokeColor:{r:0,g:0,b:0},fillFlag:!0,strokeFlag:!1,fillFirst:!0,yUnderline:1,outlineWidth:1,characterDirection:0,hindiNumbers:!1,kashida:1,diacriticPos:2},A0={isOn:!1,show:!1,size:18,leading:22,color:{r:0,g:0,b:255},leadingFillColor:{r:0,g:0,b:255},alignLineHeightToGridFlags:!1},dr=["justification","firstLineIndent","startIndent","endIndent","spaceBefore","spaceAfter","autoHyphenate","hyphenatedWordSize","preHyphen","postHyphen","consecutiveHyphens","zone","wordSpacing","letterSpacing","glyphSpacing","autoLeading","leadingType","hanging","burasagari","kinsokuOrder","everyLineComposer"],fr=["font","fontSize","fauxBold","fauxItalic","autoLeading","leading","horizontalScale","verticalScale","tracking","autoKerning","kerning","baselineShift","fontCaps","fontBaseline","underline","strikethrough","ligatures","dLigatures","baselineDirection","tsume","styleRunAlignment","language","noBreak","fillColor","strokeColor","fillFlag","strokeFlag","fillFirst","yUnderline","outlineWidth","characterDirection","hindiNumbers","kashida","diacriticPos"],Ul=["none","crisp","strong","smooth","sharp"],Ll=["left","right","center","justify-left","justify-right","justify-center","justify-all"];function Ml(e){return e.substring(0,1).toUpperCase()+e.substring(1)}function E0(e){let n=e.Values;switch(e.Type){case 0:return{k:n[1]*255};case 1:return n[0]===1?{r:n[1]*255,g:n[2]*255,b:n[3]*255}:{r:n[1]*255,g:n[2]*255,b:n[3]*255,a:n[0]*255};case 2:return{c:n[1]*255,m:n[2]*255,y:n[3]*255,k:n[4]*255};default:throw new Error("Unknown color type in text layer")}}function cr(e){if(e){if("r"in e)return{Type:1,Values:["a"in e?e.a/255:1,e.r/255,e.g/255,e.b/255]};if("c"in e)return{Type:2,Values:[1,e.c/255,e.m/255,e.y/255,e.k/255]};if("k"in e)return{Type:0,Values:[1,e.k/255]};throw new Error("Invalid color type in text layer")}else return{Type:1,Values:[0,0,0,0]}}function Cl(e,n){if(!e||!n||e.length!==n.length)return!1;for(let t=0;t<e.length;t++)if(e[t]!==n[t])return!1;return!0}function Al(e,n){if(!e||!n)return!1;for(let t of Object.keys(e))if(e[t]!==n[t])return!1;for(let t of Object.keys(n))if(e[t]!==n[t])return!1;return!0}function P0(e,n){for(let t=0;t<e.length;t++)if(e[t].name===n.name)return t;return e.push(n),e.length-1}function Tl(e,n,t){let i={};for(let o of n){let r=Ml(o);e[r]!==void 0&&(o==="justification"?i[o]=Ll[e[r]]:o==="font"?i[o]=t[e[r]]:o==="fillColor"||o==="strokeColor"?i[o]=E0(e[r]):i[o]=e[r])}return i}function Bl(e,n,t){var i;let o={};for(let r of n){let s=Ml(r);e[r]!==void 0&&(r==="justification"?o[s]=Ll.indexOf((i=e[r])!==null&&i!==void 0?i:"left"):r==="font"?o[s]=P0(t,e[r]):r==="fillColor"||r==="strokeColor"?o[s]=cr(e[r]):o[s]=e[r])}return o}function U0(e,n){return Tl(e,dr,n)}function L0(e,n){return Tl(e,fr,n)}function Gi(e,n){return Bl(e,dr,n)}function lr(e,n){return Bl(e,fr,n)}function El(e,n,t){if(n.length){for(let i of t){let o=n[0].style[i];if(o!==void 0){let s=!1;Array.isArray(o)?s=n.every(a=>Cl(a.style[i],o)):typeof o=="object"?s=n.every(a=>Al(a.style[i],o)):s=n.every(a=>a.style[i]===o),s&&(e[i]=o)}if(e[i]!==void 0)for(let s of n){let a=!1;Array.isArray(o)?a=Cl(s.style[i],o):typeof o=="object"?a=Al(s.style[i],o):a=s.style[i]===o,a&&delete s.style[i]}}n.every(i=>Object.keys(i.style).length===0)&&(n.length=0)}}function M0(e){var n,t,i,o,r,s;let a=e.EngineDict,l=e.ResourceDict,c=l.FontSet.map(b=>({name:b.Name,script:b.Script,type:b.FontType,synthetic:b.Synthetic})),d=a.Editor.Text.replace(/\\r/g,`\n`),h=0;for(;/\\n$/.test(d);)d=d.substring(0,d.length-1),h++;let f={text:d,antiAlias:(n=Ul[a.AntiAlias])!==null&&n!==void 0?n:"smooth",useFractionalGlyphWidths:!!a.UseFractionalGlyphWidths,superscriptSize:l.SuperscriptSize,superscriptPosition:l.SuperscriptPosition,subscriptSize:l.SubscriptSize,subscriptPosition:l.SubscriptPosition,smallCapSize:l.SmallCapSize},u=(s=(r=(o=(i=(t=a.Rendered)===null||t===void 0?void 0:t.Shapes)===null||i===void 0?void 0:i.Children)===null||o===void 0?void 0:o[0])===null||r===void 0?void 0:r.Cookie)===null||s===void 0?void 0:s.Photoshop;u&&(f.shapeType=u.ShapeType===1?"box":"point",u.PointBase&&(f.pointBase=u.PointBase),u.BoxBounds&&(f.boxBounds=u.BoxBounds));let p=a.ParagraphRun;f.paragraphStyle={},f.paragraphStyleRuns=[];for(let b=0;b<p.RunArray.length;b++){let y=p.RunArray[b],S=p.RunLengthArray[b],x=U0(y.ParagraphSheet.Properties,c);f.paragraphStyleRuns.push({length:S,style:x})}for(let b=h;f.paragraphStyleRuns.length&&b>0;b--)--f.paragraphStyleRuns[f.paragraphStyleRuns.length-1].length===0&&f.paragraphStyleRuns.pop();El(f.paragraphStyle,f.paragraphStyleRuns,dr),f.paragraphStyleRuns.length||delete f.paragraphStyleRuns;let _=a.StyleRun;f.style={},f.styleRuns=[];for(let b=0;b<_.RunArray.length;b++){let y=_.RunLengthArray[b],S=L0(_.RunArray[b].StyleSheet.StyleSheetData,c);S.font||(S.font=c[0]),f.styleRuns.push({length:y,style:S})}for(let b=h;f.styleRuns.length&&b>0;b--)--f.styleRuns[f.styleRuns.length-1].length===0&&f.styleRuns.pop();return El(f.style,f.styleRuns,fr),f.styleRuns.length||delete f.styleRuns,f}function T0(e){var n,t,i,o,r,s,a,l,c,d,h,f;let u=`${(e.text||"").replace(/\\r?\\n/g,"\\r")}\\r`,p=[{name:"AdobeInvisFont",script:0,type:0,synthetic:0}],_=((n=e.style)===null||n===void 0?void 0:n.font)||((i=(t=e.styleRuns)===null||t===void 0?void 0:t.find($=>$.style.font))===null||i===void 0?void 0:i.style.font)||Pl,b=[],y=[],S=e.paragraphStyleRuns;if(S&&S.length){let $=u.length;for(let ne of S){let pe=Math.min(ne.length,$);$-=pe,pe&&($===1&&ne===S[S.length-1]&&(pe++,$--),y.push(pe),b.push({ParagraphSheet:{DefaultStyleSheet:0,Properties:Gi(Object.assign(Object.assign(Object.assign({},Vi),e.paragraphStyle),ne.style),p)},Adjustments:{Axis:[1,0,1],XY:[0,0]}}))}$&&(y.push($),b.push({ParagraphSheet:{DefaultStyleSheet:0,Properties:Gi(Object.assign(Object.assign({},Vi),e.paragraphStyle),p)},Adjustments:{Axis:[1,0,1],XY:[0,0]}}))}else for(let $=0,ne=0;$<u.length;$++)u.charCodeAt($)===13&&(y.push($-ne+1),b.push({ParagraphSheet:{DefaultStyleSheet:0,Properties:Gi(Object.assign(Object.assign({},Vi),e.paragraphStyle),p)},Adjustments:{Axis:[1,0,1],XY:[0,0]}}),ne=$+1);let x=lr(Object.assign(Object.assign({},C0),{font:_}),p),v=e.styleRuns||[{length:u.length,style:e.style||{}}],F=[],C=[],I=u.length;for(let $ of v){let ne=Math.min($.length,I);I-=ne,ne&&(I===1&&$===v[v.length-1]&&(ne++,I--),C.push(ne),F.push({StyleSheet:{StyleSheetData:lr(Object.assign(Object.assign({kerning:0,autoKerning:!0,fillColor:{r:0,g:0,b:0}},e.style),$.style),p)}}))}I&&v.length&&(C.push(I),F.push({StyleSheet:{StyleSheetData:lr(Object.assign({kerning:0,autoKerning:!0,fillColor:{r:0,g:0,b:0}},e.style),p)}}));let E=Object.assign(Object.assign({},A0),e.gridInfo),L=e.orientation==="vertical"?2:0,M=e.orientation==="vertical"?1:0,j=e.shapeType==="box"?1:0,he={ShapeType:j};j===0?he.PointBase=e.pointBase||[0,0]:he.BoxBounds=e.boxBounds||[0,0,0,0],he.Base={ShapeType:j,TransformPoint0:[1,0],TransformPoint1:[0,1],TransformPoint2:[0,0]};let we={KinsokuSet:[{Name:"PhotoshopKinsokuHard",NoStart:"\\u3001\\u3002\\uFF0C\\uFF0E\\u30FB\\uFF1A\\uFF1B\\uFF1F\\uFF01\\u30FC\\u2015\\u2019\\u201D\\uFF09\\u3015\\uFF3D\\uFF5D\\u3009\\u300B\\u300D\\u300F\\u3011\\u30FD\\u30FE\\u309D\\u309E\\u3005\\u3041\\u3043\\u3045\\u3047\\u3049\\u3063\\u3083\\u3085\\u3087\\u308E\\u30A1\\u30A3\\u30A5\\u30A7\\u30A9\\u30C3\\u30E3\\u30E5\\u30E7\\u30EE\\u30F5\\u30F6\\u309B\\u309C?!)]},.:;\\u2103\\u2109\\xA2\\uFF05\\u2030",NoEnd:"\\u2018\\u201C\\uFF08\\u3014\\uFF3B\\uFF5B\\u3008\\u300A\\u300C\\u300E\\u3010([{\\uFFE5\\uFF04\\xA3\\uFF20\\xA7\\u3012\\uFF03",Keep:"\\u2015\\u2025",Hanging:"\\u3001\\u3002.,"},{Name:"PhotoshopKinsokuSoft",NoStart:"\\u3001\\u3002\\uFF0C\\uFF0E\\u30FB\\uFF1A\\uFF1B\\uFF1F\\uFF01\\u2019\\u201D\\uFF09\\u3015\\uFF3D\\uFF5D\\u3009\\u300B\\u300D\\u300F\\u3011\\u30FD\\u30FE\\u309D\\u309E\\u3005",NoEnd:"\\u2018\\u201C\\uFF08\\u3014\\uFF3B\\uFF5B\\u3008\\u300A\\u300C\\u300E\\u3010",Keep:"\\u2015\\u2025",Hanging:"\\u3001\\u3002.,"}],MojiKumiSet:[{InternalName:"Photoshop6MojiKumiSet1"},{InternalName:"Photoshop6MojiKumiSet2"},{InternalName:"Photoshop6MojiKumiSet3"},{InternalName:"Photoshop6MojiKumiSet4"}],TheNormalStyleSheet:0,TheNormalParagraphSheet:0,ParagraphSheetSet:[{Name:"Normal RGB",DefaultStyleSheet:0,Properties:Gi(Object.assign(Object.assign({},Vi),e.paragraphStyle),p)}],StyleSheetSet:[{Name:"Normal RGB",StyleSheetData:x}],FontSet:p.map($=>({Name:$.name,Script:$.script||0,FontType:$.type||0,Synthetic:$.synthetic||0})),SuperscriptSize:(o=e.superscriptSize)!==null&&o!==void 0?o:.583,SuperscriptPosition:(r=e.superscriptPosition)!==null&&r!==void 0?r:.333,SubscriptSize:(s=e.subscriptSize)!==null&&s!==void 0?s:.583,SubscriptPosition:(a=e.subscriptPosition)!==null&&a!==void 0?a:.333,SmallCapSize:(l=e.smallCapSize)!==null&&l!==void 0?l:.7};return{EngineDict:{Editor:{Text:u},ParagraphRun:{DefaultRunData:{ParagraphSheet:{DefaultStyleSheet:0,Properties:{}},Adjustments:{Axis:[1,0,1],XY:[0,0]}},RunArray:b,RunLengthArray:y,IsJoinable:1},StyleRun:{DefaultRunData:{StyleSheet:{StyleSheetData:{}}},RunArray:F,RunLengthArray:C,IsJoinable:2},GridInfo:{GridIsOn:!!E.isOn,ShowGrid:!!E.show,GridSize:(c=E.size)!==null&&c!==void 0?c:18,GridLeading:(d=E.leading)!==null&&d!==void 0?d:22,GridColor:cr(E.color),GridLeadingFillColor:cr(E.color),AlignLineHeightToGridFlags:!!E.alignLineHeightToGridFlags},AntiAlias:Ul.indexOf((h=e.antiAlias)!==null&&h!==void 0?h:"sharp"),UseFractionalGlyphWidths:(f=e.useFractionalGlyphWidths)!==null&&f!==void 0?f:!0,Rendered:{Version:1,Shapes:{WritingDirection:L,Children:[{ShapeType:j,Procession:M,Lines:{WritingDirection:L,Children:[]},Cookie:{Photoshop:he}}]}}},ResourceDict:Object.assign({},we),DocumentResources:Object.assign({},we)}}});var zl=ee(gr=>{"use strict";Object.defineProperty(gr,"__esModule",{value:!0});gr.decodeEngineData2=R0;var ur={0:{uproot:!0,children:{0:{name:"Type"},1:{name:"Values"}}}},pr={0:{name:"Font"},1:{name:"FontSize"},2:{name:"FauxBold"},3:{name:"FauxItalic"},4:{name:"AutoLeading"},5:{name:"Leading"},6:{name:"HorizontalScale"},7:{name:"VerticalScale"},8:{name:"Tracking"},9:{name:"BaselineShift"},11:{name:"Kerning?"},12:{name:"FontCaps"},13:{name:"FontBaseline"},15:{name:"Strikethrough?"},16:{name:"Underline?"},18:{name:"Ligatures"},19:{name:"DLigatures"},23:{name:"Fractions"},24:{name:"Ordinals"},28:{name:"StylisticAlternates"},30:{name:"OldStyle?"},35:{name:"BaselineDirection"},38:{name:"Language"},52:{name:"NoBreak"},53:{name:"FillColor",children:ur},54:{name:"StrokeColor",children:ur},55:{children:{99:{uproot:!0}}},79:{children:ur}},hr={0:{name:"Justification"},1:{name:"FirstLineIndent"},2:{name:"StartIndent"},3:{name:"EndIndent"},4:{name:"SpaceBefore"},5:{name:"SpaceAfter"},7:{name:"AutoLeading"},9:{name:"AutoHyphenate"},10:{name:"HyphenatedWordSize"},11:{name:"PreHyphen"},12:{name:"PostHyphen"},13:{name:"ConsecutiveHyphens?"},14:{name:"Zone"},15:{name:"HypenateCapitalizedWords"},17:{name:"WordSpacing"},18:{name:"LetterSpacing"},19:{name:"GlyphSpacing"},32:{name:"StyleSheet",children:pr}},jl={name:"StyleSheetData",children:pr},B0={0:{name:"ResourceDict",children:{1:{name:"FontSet",children:{0:{uproot:!0,children:{0:{uproot:!0,children:{0:{uproot:!0,children:{0:{name:"Name"},2:{name:"FontType"}}}}}}}}},2:{name:"2",children:{}},3:{name:"MojiKumiSet",children:{0:{uproot:!0,children:{0:{uproot:!0,children:{0:{name:"InternalName"}}}}}}},4:{name:"KinsokuSet",children:{0:{uproot:!0,children:{0:{uproot:!0,children:{0:{name:"Name"},5:{uproot:!0,children:{0:{name:"NoStart"},1:{name:"NoEnd"},2:{name:"Keep"},3:{name:"Hanging"},4:{name:"Name"}}}}}}}}},5:{name:"StyleSheetSet",children:{0:{uproot:!0,children:{0:{uproot:!0,children:{0:{name:"Name"},6:jl}}}}}},6:{name:"ParagraphSheetSet",children:{0:{uproot:!0,children:{0:{uproot:!0,children:{0:{name:"Name"},5:{name:"Properties",children:hr},6:{name:"DefaultStyleSheet"}}}}}}},8:{name:"TextFrameSet",children:{0:{uproot:!0,children:{0:{name:"path",children:{0:{name:"name"},1:{name:"bezierCurve",children:{0:{name:"controlPoints"}}},2:{name:"data",children:{0:{name:"type"},1:{name:"orientation"},2:{name:"frameMatrix"},4:{name:"4"},6:{name:"textRange"},7:{name:"rowGutter"},8:{name:"columnGutter"},9:{name:"9"},10:{name:"baselineAlignment",children:{0:{name:"flag"},1:{name:"min"}}},11:{name:"pathData",children:{1:{name:"1"},0:{name:"reversed"},2:{name:"2"},3:{name:"3"},4:{name:"spacing"},5:{name:"5"},6:{name:"6"},7:{name:"7"},18:{name:"18"}}},12:{name:"12"},13:{name:"13"}}},3:{name:"3"},97:{name:"uuid"}}}}}}},9:{name:"Predefined",children:{0:{children:{0:{uproot:!0}}},1:{children:{0:{uproot:!0}}}}}}},1:{name:"EngineDict",children:{0:{name:"0",children:{3:{name:"SuperscriptSize"},4:{name:"SuperscriptPosition"},5:{name:"SubscriptSize"},6:{name:"SubscriptPosition"},7:{name:"SmallCapSize"},8:{name:"UseFractionalGlyphWidths"},15:{children:{0:{uproot:!0}}}}},1:{name:"Editors?",children:{0:{name:"Editor",children:{0:{name:"Text"},5:{name:"ParagraphRun",children:{0:{name:"RunArray",children:{0:{name:"ParagraphSheet",children:{0:{uproot:!0,children:{0:{name:"0"},5:{name:"5",children:hr},6:{name:"6"}}}}},1:{name:"RunLength"}}}}},6:{name:"StyleRun",children:{0:{name:"RunArray",children:{0:{name:"StyleSheet",children:{0:{uproot:!0,children:{6:jl}}}},1:{name:"RunLength"}}}}}}},1:{name:"FontVectorData ???"}}},2:{name:"StyleSheet",children:pr},3:{name:"ParagraphSheet",children:hr}}}};function Hn(e,n){var t,i;if(e===null)return e;if(Array.isArray(e))return e.map(r=>Hn(r,n));if(typeof e!="object")return e;let o={};for(let r of Object.keys(e))if(n[r])if(n[r].uproot){r!=="99"&&(o=Hn(e[r],(t=n[r].children)!==null&&t!==void 0?t:{})),e[99]&&(o._type=e[99]);break}else o[n[r].name||r]=Hn(e[r],(i=n[r].children)!==null&&i!==void 0?i:{});else r==="99"?o._type=e[r]:o[r]=Hn(e[r],{});return o}function R0(e){return Hn(e,B0)}});var ji=ee(De=>{"use strict";Object.defineProperty(De,"__esModule",{value:!0});De.booleanOperations=De.infoHandlersMap=De.infoHandlers=void 0;De.readBezierKnot=Kl;De.readVectorMask=Yl;De.hasMultiEffects=vr;var Nl=Si(),Vl=Il(),Ge=At(),g=Et(),m=pn(),w=Ii(),_r=Ol(),Gl=Rl(),j0=zl(),Ve="abcdefghijklmnopqrstuvwxyz";De.infoHandlers=[];De.infoHandlersMap={};function P(e,n,t,i){let o={key:e,has:n,read:t,write:i};De.infoHandlers.push(o),De.infoHandlersMap[o.key]=o}function Tt(e,n){De.infoHandlersMap[e]=De.infoHandlersMap[n]}function re(e){return n=>n[e]!==void 0}function mr(e){if((0,g.readUint32)(e))throw new Error(`Resource size above 4 GB limit at ${e.offset.toString(16)}`);return(0,g.readUint32)(e)}function br(e,n){(0,m.writeUint32)(e,0),(0,m.writeUint32)(e,n)}P("TySh",re("text"),(e,n,t)=>{if((0,g.readInt16)(e)!==1)throw new Error("Invalid TySh version");let i=[];for(let s=0;s<6;s++)i.push((0,g.readFloat64)(e));if((0,g.readInt16)(e)!==50)throw new Error("Invalid TySh text version");let o=(0,w.readVersionAndDescriptor)(e);if((0,g.readInt16)(e)!==1)throw new Error("Invalid TySh warp version");let r=(0,w.readVersionAndDescriptor)(e);if(n.text={transform:i,left:(0,g.readFloat32)(e),top:(0,g.readFloat32)(e),right:(0,g.readFloat32)(e),bottom:(0,g.readFloat32)(e),text:o["Txt "].replace(/\\r/g,`\n`),index:o.TextIndex||0,gridding:w.textGridding.decode(o.textGridding),antiAlias:w.Annt.decode(o.AntA),orientation:w.Ornt.decode(o.Ornt),warp:{style:w.warpStyle.decode(r.warpStyle),value:r.warpValue||0,perspective:r.warpPerspective||0,perspectiveOther:r.warpPerspectiveOther||0,rotate:w.Ornt.decode(r.warpRotate)}},o.bounds&&(n.text.bounds=(0,w.descBoundsToBounds)(o.bounds)),o.boundingBox&&(n.text.boundingBox=(0,w.descBoundsToBounds)(o.boundingBox)),o.EngineData){let s=(0,_r.parseEngineData)(o.EngineData),a=(0,Gl.decodeEngineData)(s);n.text=Object.assign(Object.assign({},n.text),a)}(0,g.skipBytes)(e,t())},(e,n)=>{let t=n.text,i=t.warp||{},o=t.transform||[1,0,0,1,0,0],r=Object.assign(Object.assign(Object.assign({"Txt ":(t.text||"").replace(/\\r?\\n/g,"\\r"),textGridding:w.textGridding.encode(t.gridding),Ornt:w.Ornt.encode(t.orientation),AntA:w.Annt.encode(t.antiAlias)},t.bounds?{bounds:(0,w.boundsToDescBounds)(t.bounds)}:{}),t.boundingBox?{boundingBox:(0,w.boundsToDescBounds)(t.boundingBox)}:{}),{TextIndex:t.index||0,EngineData:(0,_r.serializeEngineData)((0,Gl.encodeEngineData)(t))});(0,m.writeInt16)(e,1);for(let s=0;s<6;s++)(0,m.writeFloat64)(e,o[s]);(0,m.writeInt16)(e,50),(0,w.writeVersionAndDescriptor)(e,"","TxLr",r,"text"),(0,m.writeInt16)(e,1),(0,w.writeVersionAndDescriptor)(e,"","warp",Ki(i)),(0,m.writeFloat32)(e,t.left),(0,m.writeFloat32)(e,t.top),(0,m.writeFloat32)(e,t.right),(0,m.writeFloat32)(e,t.bottom)});P("SoCo",e=>e.vectorFill!==void 0&&e.vectorStroke===void 0&&e.vectorFill.type==="color",(e,n)=>{let t=(0,w.readVersionAndDescriptor)(e);n.vectorFill=(0,w.parseVectorContent)(t)},(e,n)=>{let{descriptor:t}=(0,w.serializeVectorContent)(n.vectorFill);(0,w.writeVersionAndDescriptor)(e,"","null",t)});P("GdFl",e=>e.vectorFill!==void 0&&e.vectorStroke===void 0&&(e.vectorFill.type==="solid"||e.vectorFill.type==="noise"),(e,n,t)=>{let i=(0,w.readVersionAndDescriptor)(e);n.vectorFill=(0,w.parseVectorContent)(i),(0,g.skipBytes)(e,t())},(e,n)=>{let{descriptor:t}=(0,w.serializeVectorContent)(n.vectorFill);(0,w.writeVersionAndDescriptor)(e,"","null",t)});P("PtFl",e=>e.vectorFill!==void 0&&e.vectorStroke===void 0&&e.vectorFill.type==="pattern",(e,n)=>{let t=(0,w.readVersionAndDescriptor)(e);n.vectorFill=(0,w.parseVectorContent)(t)},(e,n)=>{let{descriptor:t}=(0,w.serializeVectorContent)(n.vectorFill);(0,w.writeVersionAndDescriptor)(e,"","null",t)});P("vscg",e=>e.vectorFill!==void 0&&e.vectorStroke!==void 0,(e,n,t)=>{(0,g.readSignature)(e);let i=(0,w.readVersionAndDescriptor)(e);n.vectorFill=(0,w.parseVectorContent)(i),(0,g.skipBytes)(e,t())},(e,n)=>{let{descriptor:t,key:i}=(0,w.serializeVectorContent)(n.vectorFill);(0,m.writeSignature)(e,i),(0,w.writeVersionAndDescriptor)(e,"","null",t)});function Kl(e,n,t){let i=(0,g.readFixedPointPath32)(e)*t,o=(0,g.readFixedPointPath32)(e)*n,r=(0,g.readFixedPointPath32)(e)*t,s=(0,g.readFixedPointPath32)(e)*n,a=(0,g.readFixedPointPath32)(e)*t,l=(0,g.readFixedPointPath32)(e)*n;return[o,i,s,r,l,a]}function z0(e,n,t,i){(0,m.writeFixedPointPath32)(e,n[1]/i),(0,m.writeFixedPointPath32)(e,n[0]/t),(0,m.writeFixedPointPath32)(e,n[3]/i),(0,m.writeFixedPointPath32)(e,n[2]/t),(0,m.writeFixedPointPath32)(e,n[5]/i),(0,m.writeFixedPointPath32)(e,n[4]/t)}De.booleanOperations=["exclude","combine","subtract","intersect"];function Yl(e,n,t,i,o){let r=e.offset+o,s=n.paths,a;for(;r-e.offset>=26;){let l=(0,g.readUint16)(e);switch(l){case 0:case 3:{(0,g.readUint16)(e);let c=(0,g.readInt16)(e),d=(0,g.readUint16)(e);(0,g.skipBytes)(e,18),a={open:l===3,knots:[],fillRule:d===2?"non-zero":"even-odd"},c!==-1&&(a.operation=De.booleanOperations[c]),s.push(a);break}case 1:case 2:case 4:case 5:a.knots.push({linked:l===1||l===4,points:Kl(e,t,i)});break;case 6:(0,g.skipBytes)(e,24);break;case 7:{let c=(0,g.readFixedPointPath32)(e),d=(0,g.readFixedPointPath32)(e),h=(0,g.readFixedPointPath32)(e),f=(0,g.readFixedPointPath32)(e),u=(0,g.readFixedPointPath32)(e);(0,g.skipBytes)(e,4),n.clipboard={top:c,left:d,bottom:h,right:f,resolution:u};break}case 8:n.fillStartsWithAllPixels=!!(0,g.readUint16)(e),(0,g.skipBytes)(e,22);break;default:throw new Error("Invalid vmsk section")}}return s}P("vmsk",re("vectorMask"),(e,n,t,{width:i,height:o})=>{if((0,g.readUint32)(e)!==3)throw new Error("Invalid vmsk version");n.vectorMask={paths:[]};let r=n.vectorMask,s=(0,g.readUint32)(e);r.invert=(s&1)!==0,r.notLink=(s&2)!==0,r.disable=(s&4)!==0,Yl(e,r,i,o,t()),(0,g.skipBytes)(e,t())},(e,n,{width:t,height:i})=>{let o=n.vectorMask,r=(o.invert?1:0)|(o.notLink?2:0)|(o.disable?4:0);(0,m.writeUint32)(e,3),(0,m.writeUint32)(e,r),(0,m.writeUint16)(e,6),(0,m.writeZeros)(e,24);let s=o.clipboard;s&&((0,m.writeUint16)(e,7),(0,m.writeFixedPointPath32)(e,s.top),(0,m.writeFixedPointPath32)(e,s.left),(0,m.writeFixedPointPath32)(e,s.bottom),(0,m.writeFixedPointPath32)(e,s.right),(0,m.writeFixedPointPath32)(e,s.resolution),(0,m.writeZeros)(e,4)),(0,m.writeUint16)(e,8),(0,m.writeUint16)(e,o.fillStartsWithAllPixels?1:0),(0,m.writeZeros)(e,22);for(let a of o.paths){(0,m.writeUint16)(e,a.open?3:0),(0,m.writeUint16)(e,a.knots.length),(0,m.writeUint16)(e,a.operation?De.booleanOperations.indexOf(a.operation):-1),(0,m.writeUint16)(e,a.fillRule==="non-zero"?2:1),(0,m.writeZeros)(e,18);let l=a.open?4:1,c=a.open?5:2;for(let{linked:d,points:h}of a.knots)(0,m.writeUint16)(e,d?l:c),z0(e,h,t,i)}});Tt("vsms","vmsk");P("vowv",re("vowv"),(e,n)=>{n.vowv=(0,g.readUint32)(e)},(e,n)=>{(0,m.writeUint32)(e,n.vowv)});P("vogk",re("vectorOrigination"),(e,n,t)=>{if((0,g.readInt32)(e)!==1)throw new Error("Invalid vogk version");let i=(0,w.readVersionAndDescriptor)(e);n.vectorOrigination={keyDescriptorList:[]};for(let o of i.keyDescriptorList){let r={};o.keyShapeInvalidated!=null&&(r.keyShapeInvalidated=o.keyShapeInvalidated),o.keyOriginType!=null&&(r.keyOriginType=o.keyOriginType),o.keyOriginResolution!=null&&(r.keyOriginResolution=o.keyOriginResolution),o.keyOriginShapeBBox&&(r.keyOriginShapeBoundingBox={top:(0,w.parseUnitsOrNumber)(o.keyOriginShapeBBox["Top "]),left:(0,w.parseUnitsOrNumber)(o.keyOriginShapeBBox.Left),bottom:(0,w.parseUnitsOrNumber)(o.keyOriginShapeBBox.Btom),right:(0,w.parseUnitsOrNumber)(o.keyOriginShapeBBox.Rght)});let s=o.keyOriginRRectRadii;s&&(r.keyOriginRRectRadii={topRight:(0,w.parseUnits)(s.topRight),topLeft:(0,w.parseUnits)(s.topLeft),bottomLeft:(0,w.parseUnits)(s.bottomLeft),bottomRight:(0,w.parseUnits)(s.bottomRight)});let a=o.keyOriginBoxCorners;a&&(r.keyOriginBoxCorners=[{x:a.rectangleCornerA.Hrzn,y:a.rectangleCornerA.Vrtc},{x:a.rectangleCornerB.Hrzn,y:a.rectangleCornerB.Vrtc},{x:a.rectangleCornerC.Hrzn,y:a.rectangleCornerC.Vrtc},{x:a.rectangleCornerD.Hrzn,y:a.rectangleCornerD.Vrtc}]);let l=o.Trnf;l&&(r.transform=[l.xx,l.xy,l.yx,l.yy,l.tx,l.ty]),n.vectorOrigination.keyDescriptorList.push(r)}(0,g.skipBytes)(e,t())},(e,n)=>{let t=n.vectorOrigination,i={keyDescriptorList:[]};for(let o=0;o<t.keyDescriptorList.length;o++){let r=t.keyDescriptorList[o];i.keyDescriptorList.push({});let s=i.keyDescriptorList[i.keyDescriptorList.length-1];r.keyOriginType!=null&&(s.keyOriginType=r.keyOriginType),r.keyOriginResolution!=null&&(s.keyOriginResolution=r.keyOriginResolution);let a=r.keyOriginRRectRadii;a&&(s.keyOriginRRectRadii={unitValueQuadVersion:1,topRight:(0,w.unitsValue)(a.topRight,"topRight"),topLeft:(0,w.unitsValue)(a.topLeft,"topLeft"),bottomLeft:(0,w.unitsValue)(a.bottomLeft,"bottomLeft"),bottomRight:(0,w.unitsValue)(a.bottomRight,"bottomRight")});let l=r.keyOriginShapeBoundingBox;l&&(s.keyOriginShapeBBox={unitValueQuadVersion:1,"Top ":(0,w.unitsValue)(l.top,"top"),Left:(0,w.unitsValue)(l.left,"left"),Btom:(0,w.unitsValue)(l.bottom,"bottom"),Rght:(0,w.unitsValue)(l.right,"right")});let c=r.keyOriginBoxCorners;c&&c.length===4&&(s.keyOriginBoxCorners={rectangleCornerA:{Hrzn:c[0].x,Vrtc:c[0].y},rectangleCornerB:{Hrzn:c[1].x,Vrtc:c[1].y},rectangleCornerC:{Hrzn:c[2].x,Vrtc:c[2].y},rectangleCornerD:{Hrzn:c[3].x,Vrtc:c[3].y}});let d=r.transform;d&&d.length===6&&(s.Trnf={xx:d[0],xy:d[1],yx:d[2],yy:d[3],tx:d[4],ty:d[5]}),r.keyShapeInvalidated!=null&&(s.keyShapeInvalidated=r.keyShapeInvalidated),s.keyOriginIndex=o}(0,m.writeInt32)(e,1),(0,w.writeVersionAndDescriptor)(e,"","null",i)});P("lmfx",e=>e.effects!==void 0&&vr(e.effects),(e,n,t)=>{if((0,g.readUint32)(e)!==0)throw new Error("Invalid lmfx version");let o=(0,w.readVersionAndDescriptor)(e);n.effects=(0,w.parseEffects)(o,!!e.logMissingFeatures),(0,g.skipBytes)(e,t())},(e,n,t,i)=>{let o=(0,w.serializeEffects)(n.effects,!!i.logMissingFeatures,!0);(0,m.writeUint32)(e,0),(0,w.writeVersionAndDescriptor)(e,"","null",o)});P("lrFX",re("effects"),(e,n,t)=>{n.effects||(n.effects=(0,Vl.readEffects)(e)),(0,g.skipBytes)(e,t())},(e,n)=>{(0,Vl.writeEffects)(e,n.effects)});P("luni",re("name"),(e,n,t)=>{if(t()>4){let i=(0,g.readUint32)(e);t()>=i*2?n.name=(0,g.readUnicodeStringWithLength)(e,i):e.logDevFeatures&&e.log("name in luni section is too long")}else e.logDevFeatures&&e.log("empty luni section");(0,g.skipBytes)(e,t())},(e,n)=>{(0,m.writeUnicodeString)(e,n.name)});P("lnsr",re("nameSource"),(e,n)=>n.nameSource=(0,g.readSignature)(e),(e,n)=>(0,m.writeSignature)(e,n.nameSource));P("lyid",re("id"),(e,n)=>{n.id=(0,g.readUint32)(e)},(e,n,t,i)=>{let o=n.id;for(;i.layerIds.has(o);)o+=100;(0,m.writeUint32)(e,o),i.layerIds.add(o),i.layerToId.set(n,o)});P("lsct",re("sectionDivider"),(e,n,t)=>{n.sectionDivider={type:(0,g.readUint32)(e)},t()&&((0,g.checkSignature)(e,"8BIM"),n.sectionDivider.key=(0,g.readSignature)(e)),t()&&(n.sectionDivider.subType=(0,g.readUint32)(e))},(e,n)=>{(0,m.writeUint32)(e,n.sectionDivider.type),n.sectionDivider.key&&((0,m.writeSignature)(e,"8BIM"),(0,m.writeSignature)(e,n.sectionDivider.key),n.sectionDivider.subType!==void 0&&(0,m.writeUint32)(e,n.sectionDivider.subType))});Tt("lsdk","lsct");P("clbl",re("blendClippendElements"),(e,n)=>{n.blendClippendElements=!!(0,g.readUint8)(e),(0,g.skipBytes)(e,3)},(e,n)=>{(0,m.writeUint8)(e,n.blendClippendElements?1:0),(0,m.writeZeros)(e,3)});P("infx",re("blendInteriorElements"),(e,n)=>{n.blendInteriorElements=!!(0,g.readUint8)(e),(0,g.skipBytes)(e,3)},(e,n)=>{(0,m.writeUint8)(e,n.blendInteriorElements?1:0),(0,m.writeZeros)(e,3)});P("knko",re("knockout"),(e,n)=>{n.knockout=!!(0,g.readUint8)(e),(0,g.skipBytes)(e,3)},(e,n)=>{(0,m.writeUint8)(e,n.knockout?1:0),(0,m.writeZeros)(e,3)});P("lmgm",re("layerMaskAsGlobalMask"),(e,n)=>{n.layerMaskAsGlobalMask=!!(0,g.readUint8)(e),(0,g.skipBytes)(e,3)},(e,n)=>{(0,m.writeUint8)(e,n.layerMaskAsGlobalMask?1:0),(0,m.writeZeros)(e,3)});P("lspf",re("protected"),(e,n)=>{let t=(0,g.readUint32)(e);n.protected={transparency:(t&1)!==0,composite:(t&2)!==0,position:(t&4)!==0},t&8&&(n.protected.artboards=!0)},(e,n)=>{let t=(n.protected.transparency?1:0)|(n.protected.composite?2:0)|(n.protected.position?4:0)|(n.protected.artboards?8:0);(0,m.writeUint32)(e,t)});P("lclr",re("layerColor"),(e,n)=>{let t=(0,g.readUint16)(e);(0,g.skipBytes)(e,6),n.layerColor=Ge.layerColors[t]},(e,n)=>{let t=Ge.layerColors.indexOf(n.layerColor);(0,m.writeUint16)(e,t===-1?0:t),(0,m.writeZeros)(e,6)});P("shmd",e=>e.timestamp!==void 0||e.animationFrames!==void 0||e.animationFrameFlags!==void 0||e.timeline!==void 0||e.comps!==void 0,(e,n,t)=>{let i=(0,g.readUint32)(e);for(let o=0;o<i;o++){(0,g.checkSignature)(e,"8BIM");let r=(0,g.readSignature)(e);(0,g.readUint8)(e),(0,g.skipBytes)(e,3),(0,g.readSection)(e,1,s=>{if(r==="cust"){let a=(0,w.readVersionAndDescriptor)(e);a.layerTime!==void 0&&(n.timestamp=a.layerTime)}else if(r==="mlst"){let a=(0,w.readVersionAndDescriptor)(e);n.animationFrames=[];for(let l=0;l<a.LaSt.length;l++){let c=a.LaSt[l],d={frames:c.FrLs};c.enab!==void 0&&(d.enable=c.enab),c.Ofst&&(d.offset=(0,w.horzVrtcToXY)(c.Ofst)),c.FXRf&&(d.referencePoint=(0,w.horzVrtcToXY)(c.FXRf)),c.Lefx&&(d.effects=(0,w.parseEffects)(c.Lefx,!!e.logMissingFeatures)),c.blendOptions&&c.blendOptions.Opct&&(d.opacity=(0,w.parsePercent)(c.blendOptions.Opct)),n.animationFrames.push(d)}}else if(r==="mdyn"){(0,g.readUint16)(e);let a=(0,g.readUint8)(e),l=(0,g.readUint8)(e);n.animationFrameFlags={propagateFrameOne:!a,unifyLayerPosition:(l&1)!==0,unifyLayerStyle:(l&2)!==0,unifyLayerVisibility:(l&4)!==0}}else if(r==="tmln"){let a=(0,w.readVersionAndDescriptor)(e),l=a.timeScope,c={start:(0,w.frac)(l.Strt),duration:(0,w.frac)(l.duration),inTime:(0,w.frac)(l.inTime),outTime:(0,w.frac)(l.outTime),autoScope:a.autoScope,audioLevel:a.audioLevel};a.trackList&&(c.tracks=(0,w.parseTrackList)(a.trackList,!!e.logMissingFeatures)),n.timeline=c}else if(r==="cmls"){let a=(0,w.readVersionAndDescriptor)(e);n.comps={settings:[]},a.origFXRefPoint&&(n.comps.originalEffectsReferencePoint={x:a.origFXRefPoint.Hrzn,y:a.origFXRefPoint.Vrtc});for(let l of a.layerSettings){n.comps.settings.push({compList:l.compList});let c=n.comps.settings[n.comps.settings.length-1];"enab"in l&&(c.enabled=l.enab),l.Ofst&&(c.offset={x:l.Ofst.Hrzn,y:l.Ofst.Vrtc}),l.FXRefPoint&&(c.effectsReferencePoint={x:l.FXRefPoint.Hrzn,y:l.FXRefPoint.Vrtc})}}else if(r==="extn"){let a=(0,w.readVersionAndDescriptor)(e);e.logMissingFeatures&&e.log(\'Unhandled "shmd" section key\',r)}else e.logMissingFeatures&&e.log(\'Unhandled "shmd" section key\',r);(0,g.skipBytes)(e,s())})}(0,g.skipBytes)(e,t())},(e,n,t,i)=>{let{animationFrames:o,animationFrameFlags:r,timestamp:s,timeline:a,comps:l}=n,c=0;o&&c++,r&&c++,a&&c++,s!==void 0&&c++,l&&c++,(0,m.writeUint32)(e,c),o&&((0,m.writeSignature)(e,"8BIM"),(0,m.writeSignature)(e,"mlst"),(0,m.writeUint8)(e,0),(0,m.writeZeros)(e,3),(0,m.writeSection)(e,2,()=>{var d;let h={LaID:(d=n.id)!==null&&d!==void 0?d:0,LaSt:[]};for(let f=0;f<o.length;f++){let u=o[f],p={};u.enable!==void 0&&(p.enab=u.enable),p.FrLs=u.frames,u.offset&&(p.Ofst=(0,w.xyToHorzVrtc)(u.offset)),u.referencePoint&&(p.FXRf=(0,w.xyToHorzVrtc)(u.referencePoint)),u.effects&&(p.Lefx=(0,w.serializeEffects)(u.effects,!1,!1)),u.opacity!==void 0&&(p.blendOptions={Opct:(0,w.unitsPercent)(u.opacity)}),h.LaSt.push(p)}(0,w.writeVersionAndDescriptor)(e,"","null",h)},!0)),r&&((0,m.writeSignature)(e,"8BIM"),(0,m.writeSignature)(e,"mdyn"),(0,m.writeUint8)(e,0),(0,m.writeZeros)(e,3),(0,m.writeSection)(e,2,()=>{(0,m.writeUint16)(e,0),(0,m.writeUint8)(e,r.propagateFrameOne?0:15),(0,m.writeUint8)(e,(r.unifyLayerPosition?1:0)|(r.unifyLayerStyle?2:0)|(r.unifyLayerVisibility?4:0))})),a&&((0,m.writeSignature)(e,"8BIM"),(0,m.writeSignature)(e,"tmln"),(0,m.writeUint8)(e,0),(0,m.writeZeros)(e,3),(0,m.writeSection)(e,2,()=>{let d={Vrsn:1,timeScope:{Vrsn:1,Strt:a.start,duration:a.duration,inTime:a.inTime,outTime:a.outTime},autoScope:a.autoScope,audioLevel:a.audioLevel};a.tracks&&(d.trackList=(0,w.serializeTrackList)(a.tracks));let h=i.layerToId.get(n)||n.id;if(!h)throw new Error("You need to provide layer.id value whan writing document with animations");d.LyrI=h,(0,w.writeVersionAndDescriptor)(e,"","null",d,"anim")},!0)),s!==void 0&&((0,m.writeSignature)(e,"8BIM"),(0,m.writeSignature)(e,"cust"),(0,m.writeUint8)(e,0),(0,m.writeZeros)(e,3),(0,m.writeSection)(e,2,()=>{let d={layerTime:s};(0,w.writeVersionAndDescriptor)(e,"","metadata",d)},!0)),l&&((0,m.writeSignature)(e,"8BIM"),(0,m.writeSignature)(e,"cmls"),(0,m.writeUint8)(e,0),(0,m.writeZeros)(e,3),(0,m.writeSection)(e,2,()=>{let d=i.layerToId.get(n)||n.id;if(!d)throw new Error("You need to provide layer.id value whan writing document with layer comps");let h={};l.originalEffectsReferencePoint&&(h.origFXRefPoint={Hrzn:l.originalEffectsReferencePoint.x,Vrtc:l.originalEffectsReferencePoint.y}),h.LyrI=d,h.layerSettings=[];for(let f of l.settings){let u={};f.enabled!==void 0&&(u.enab=f.enabled),f.offset&&(u.Ofst={Hrzn:f.offset.x,Vrtc:f.offset.y}),f.effectsReferencePoint&&(u.FXRefPoint={Hrzn:f.effectsReferencePoint.x,Vrtc:f.effectsReferencePoint.y}),u.compList=f.compList,h.layerSettings.push(u)}(0,w.writeVersionAndDescriptor)(e,"","null",h)},!0))});P("PxSc",()=>!1,(e,n)=>{let t=(0,w.readVersionAndDescriptor)(e,!0);t.pixelSourceType===1986285651?n.pixelSource={type:"vdPS",origin:{x:t.origin.Hrzn,y:t.origin.Vrtc},interpretation:{interpretAlpha:t.interpretation.interpretAlpha.split(".")[1],profile:t.interpretation.profile},frameReader:{type:"QTFR",link:{name:t.frameReader["Lnk "]["Nm  "],fullPath:t.frameReader["Lnk "].fullPath,originalPath:t.frameReader["Lnk "].originalPath,relativePath:t.frameReader["Lnk "].relPath,alias:t.frameReader["Lnk "].alis},mediaDescriptor:t.frameReader.mediaDescriptor},showAlteredVideo:t.showAlteredVideo}:e.log("Unknown pixelSourceType")},(e,n)=>{let t=n.pixelSource,i={_name:"",_classID:"PixelSource",pixelSourceType:1986285651,descVersion:1,origin:{Hrzn:t.origin.x,Vrtc:t.origin.y},interpretation:{_name:"",_classID:"footageInterpretation",Vrsn:1,interpretAlpha:`alphaInterpretation.${t.interpretation.interpretAlpha}`,profile:t.interpretation.profile},frameReader:{_name:"",_classID:"FrameReader",frameReaderType:1364477522,descVersion:1,"Lnk ":{_name:"",_classID:"ExternalFileLink",descVersion:2,"Nm  ":t.frameReader.link.name,fullPath:t.frameReader.link.fullPath,originalPath:t.frameReader.link.originalPath,alis:t.frameReader.link.alias,relPath:t.frameReader.link.relativePath},mediaDescriptor:t.frameReader.mediaDescriptor},showAlteredVideo:t.showAlteredVideo};(0,w.writeVersionAndDescriptor)(e,"","PixelSource",i)});P("vstk",re("vectorStroke"),(e,n,t)=>{let i=(0,w.readVersionAndDescriptor)(e);n.vectorStroke={strokeEnabled:i.strokeEnabled,fillEnabled:i.fillEnabled,lineWidth:(0,w.parseUnits)(i.strokeStyleLineWidth),lineDashOffset:(0,w.parseUnits)(i.strokeStyleLineDashOffset),miterLimit:i.strokeStyleMiterLimit,lineCapType:w.strokeStyleLineCapType.decode(i.strokeStyleLineCapType),lineJoinType:w.strokeStyleLineJoinType.decode(i.strokeStyleLineJoinType),lineAlignment:w.strokeStyleLineAlignment.decode(i.strokeStyleLineAlignment),scaleLock:i.strokeStyleScaleLock,strokeAdjust:i.strokeStyleStrokeAdjust,lineDashSet:i.strokeStyleLineDashSet.map(w.parseUnits),blendMode:w.BlnM.decode(i.strokeStyleBlendMode),opacity:(0,w.parsePercent)(i.strokeStyleOpacity),content:(0,w.parseVectorContent)(i.strokeStyleContent),resolution:i.strokeStyleResolution},(0,g.skipBytes)(e,t())},(e,n)=>{var t,i,o;let r=n.vectorStroke,s={strokeStyleVersion:2,strokeEnabled:!!r.strokeEnabled,fillEnabled:!!r.fillEnabled,strokeStyleLineWidth:r.lineWidth||{value:3,units:"Points"},strokeStyleLineDashOffset:r.lineDashOffset||{value:0,units:"Points"},strokeStyleMiterLimit:(t=r.miterLimit)!==null&&t!==void 0?t:100,strokeStyleLineCapType:w.strokeStyleLineCapType.encode(r.lineCapType),strokeStyleLineJoinType:w.strokeStyleLineJoinType.encode(r.lineJoinType),strokeStyleLineAlignment:w.strokeStyleLineAlignment.encode(r.lineAlignment),strokeStyleScaleLock:!!r.scaleLock,strokeStyleStrokeAdjust:!!r.strokeAdjust,strokeStyleLineDashSet:r.lineDashSet||[],strokeStyleBlendMode:w.BlnM.encode(r.blendMode),strokeStyleOpacity:(0,w.unitsPercent)((i=r.opacity)!==null&&i!==void 0?i:1),strokeStyleContent:(0,w.serializeVectorContent)(r.content||{type:"color",color:{r:0,g:0,b:0}}).descriptor,strokeStyleResolution:(o=r.resolution)!==null&&o!==void 0?o:72};(0,w.writeVersionAndDescriptor)(e,"","strokeStyle",s)});P("artb",re("artboard"),(e,n,t)=>{let i=(0,w.readVersionAndDescriptor)(e),o=i.artboardRect;n.artboard={rect:{top:o["Top "],left:o.Left,bottom:o.Btom,right:o.Rght},guideIndices:i.guideIndeces,presetName:i.artboardPresetName,color:(0,w.parseColor)(i["Clr "]),backgroundType:i.artboardBackgroundType},(0,g.skipBytes)(e,t())},(e,n)=>{var t;let i=n.artboard,o=i.rect,r={artboardRect:{"Top ":o.top,Left:o.left,Btom:o.bottom,Rght:o.right},guideIndeces:i.guideIndices||[],artboardPresetName:i.presetName||"","Clr ":(0,w.serializeColor)(i.color),artboardBackgroundType:(t=i.backgroundType)!==null&&t!==void 0?t:1};(0,w.writeVersionAndDescriptor)(e,"","artboard",r)});P("sn2P",re("usingAlignedRendering"),(e,n)=>n.usingAlignedRendering=!!(0,g.readUint32)(e),(e,n)=>(0,m.writeUint32)(e,n.usingAlignedRendering?1:0));var Sn=["unknown","vector","raster","image stack"];function Jl(e){var n,t,i,o,r,s;let a=Object.assign(Object.assign({style:w.warpStyle.decode(e.warpStyle)},e.warpValues?{values:e.warpValues}:{value:e.warpValue||0}),{perspective:e.warpPerspective||0,perspectiveOther:e.warpPerspectiveOther||0,rotate:w.Ornt.decode(e.warpRotate),bounds:e.bounds&&{top:(0,w.parseUnitsOrNumber)(e.bounds["Top "]),left:(0,w.parseUnitsOrNumber)(e.bounds.Left),bottom:(0,w.parseUnitsOrNumber)(e.bounds.Btom),right:(0,w.parseUnitsOrNumber)(e.bounds.Rght)},uOrder:e.uOrder,vOrder:e.vOrder});(e.deformNumRows!=null||e.deformNumCols!=null)&&(a.deformNumRows=e.deformNumRows,a.deformNumCols=e.deformNumCols);let l=e.customEnvelopeWarp;if(l){a.customEnvelopeWarp={meshPoints:[]};let c=((n=l.meshPoints.find(h=>h.type==="Hrzn"))===null||n===void 0?void 0:n.values)||[],d=((t=l.meshPoints.find(h=>h.type==="Vrtc"))===null||t===void 0?void 0:t.values)||[];for(let h=0;h<c.length;h++)a.customEnvelopeWarp.meshPoints.push({x:c[h],y:d[h]});(l.quiltSliceX||l.quiltSliceY)&&(a.customEnvelopeWarp.quiltSliceX=((o=(i=l.quiltSliceX)===null||i===void 0?void 0:i[0])===null||o===void 0?void 0:o.values)||[],a.customEnvelopeWarp.quiltSliceY=((s=(r=l.quiltSliceY)===null||r===void 0?void 0:r[0])===null||s===void 0?void 0:s.values)||[])}return a}function xr(e){var n,t;return e.deformNumCols!=null||e.deformNumRows!=null||((n=e.customEnvelopeWarp)===null||n===void 0?void 0:n.quiltSliceX)||((t=e.customEnvelopeWarp)===null||t===void 0?void 0:t.quiltSliceY)}function Ki(e){let n=e.bounds,t=Object.assign(Object.assign({warpStyle:w.warpStyle.encode(e.style)},e.values?{warpValues:e.values}:{warpValue:e.value||0}),{warpPerspective:e.perspective||0,warpPerspectiveOther:e.perspectiveOther||0,warpRotate:w.Ornt.encode(e.rotate),bounds:{"Top ":(0,w.unitsValue)(n&&n.top||{units:"Pixels",value:0},"bounds.top"),Left:(0,w.unitsValue)(n&&n.left||{units:"Pixels",value:0},"bounds.left"),Btom:(0,w.unitsValue)(n&&n.bottom||{units:"Pixels",value:0},"bounds.bottom"),Rght:(0,w.unitsValue)(n&&n.right||{units:"Pixels",value:0},"bounds.right")},uOrder:e.uOrder||0,vOrder:e.vOrder||0}),i=xr(e);if(i){let r=t;r.deformNumRows=e.deformNumRows||0,r.deformNumCols=e.deformNumCols||0}let o=e.customEnvelopeWarp;if(o){let r=o.meshPoints||[];if(i){let s=t;s.customEnvelopeWarp={_name:"",_classID:"customEnvelopeWarp",quiltSliceX:[{type:"quiltSliceX",values:o.quiltSliceX||[]}],quiltSliceY:[{type:"quiltSliceY",values:o.quiltSliceY||[]}],meshPoints:[{type:"Hrzn",values:r.map(a=>a.x)},{type:"Vrtc",values:r.map(a=>a.y)}]}}else t.customEnvelopeWarp={_name:"",_classID:"customEnvelopeWarp",meshPoints:[{type:"Hrzn",values:r.map(s=>s.x)},{type:"Vrtc",values:r.map(s=>s.y)}]}}return t}P("PlLd",re("placedLayer"),(e,n,t)=>{if((0,g.readSignature)(e)!=="plcL")throw new Error("Invalid PlLd signature");if((0,g.readInt32)(e)!==3)throw new Error("Invalid PlLd version");let i=(0,g.readPascalString)(e,1),o=(0,g.readInt32)(e),r=(0,g.readInt32)(e);(0,g.readInt32)(e);let s=(0,g.readInt32)(e);if(!Sn[s])throw new Error("Invalid PlLd type");let a=[];for(let d=0;d<8;d++)a.push((0,g.readFloat64)(e));let l=(0,g.readInt32)(e);if(l!==0)throw new Error(`Invalid Warp version ${l}`);let c=(0,w.readVersionAndDescriptor)(e);n.placedLayer=n.placedLayer||{id:i,type:Sn[s],pageNumber:o,totalPages:r,transform:a,warp:Jl(c)},(0,g.skipBytes)(e,t())},(e,n)=>{let t=n.placedLayer;if((0,m.writeSignature)(e,"plcL"),(0,m.writeInt32)(e,3),!t.id||typeof t.id!="string"||!/^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(t.id))throw new Error("Placed layer ID must be in a GUID format (example: 20953ddb-9391-11ec-b4f1-c15674f50bc4)");if((0,m.writePascalString)(e,t.id,1),(0,m.writeInt32)(e,t.pageNumber||1),(0,m.writeInt32)(e,t.totalPages||1),(0,m.writeInt32)(e,16),Sn.indexOf(t.type)===-1)throw new Error("Invalid placedLayer type");(0,m.writeInt32)(e,Sn.indexOf(t.type));for(let s=0;s<8;s++)(0,m.writeFloat64)(e,t.transform[s]);(0,m.writeInt32)(e,0);let i=Ql(t),r=xr(i)?"quiltWarp":"warp";(0,w.writeVersionAndDescriptor)(e,"",r,Ki(i),r)});function N0(e){return new Float32Array(e.buffer.slice(e.byteOffset),0,e.byteLength/4)}function V0(e){return new Uint32Array(e.buffer.slice(e.byteOffset),0,e.byteLength/4)}function yr(e){return new Uint8Array(e.buffer,e.byteOffset,e.byteLength)}function qi(e){let n=[];for(let t=0;t<e.length;t+=2)n.push({x:e[t],y:e[t+1]});return n}function Wn(e){let n=[];for(let t=0;t<e.length;t++)n.push(e[t].x,e[t].y);return n}function Hl(e){return qi(N0(e))}function $n(e){return{x:(0,w.parseUnits)(e.Hrzn),y:(0,w.parseUnits)(e.Vrtc)}}function Zn(e){return{_name:"",_classID:"Pnt ",Hrzn:(0,w.unitsValue)(e.x,"x"),Vrtc:(0,w.unitsValue)(e.y,"y")}}function G0(e,n){let t={name:e["Nm  "],opacity:(0,w.parsePercent)(e.blendOptions.Opct),blendMode:w.BlnM.decode(e.blendOptions["Md  "]),enabled:e.enab,hasOptions:e.hasoptions,foregroundColor:(0,w.parseColor)(e.FrgC),backgroundColor:(0,w.parseColor)(e.BckC)};if("Fltr"in e)switch(e.Fltr._classID){case"boxblur":return Object.assign(Object.assign({},t),{type:"box blur",filter:{radius:(0,w.parseUnits)(e.Fltr["Rds "])}});case"GsnB":return Object.assign(Object.assign({},t),{type:"gaussian blur",filter:{radius:(0,w.parseUnits)(e.Fltr["Rds "])}});case"MtnB":return Object.assign(Object.assign({},t),{type:"motion blur",filter:{angle:e.Fltr.Angl,distance:(0,w.parseUnits)(e.Fltr.Dstn)}});case"RdlB":return Object.assign(Object.assign({},t),{type:"radial blur",filter:{amount:e.Fltr.Amnt,method:w.BlrM.decode(e.Fltr.BlrM),quality:w.BlrQ.decode(e.Fltr.BlrQ)}});case"shapeBlur":return Object.assign(Object.assign({},t),{type:"shape blur",filter:{radius:(0,w.parseUnits)(e.Fltr["Rds "]),customShape:{name:e.Fltr.customShape["Nm  "],id:e.Fltr.customShape.Idnt}}});case"SmrB":return Object.assign(Object.assign({},t),{type:"smart blur",filter:{radius:e.Fltr["Rds "],threshold:e.Fltr.Thsh,quality:w.SmBQ.decode(e.Fltr.SmBQ),mode:w.SmBM.decode(e.Fltr.SmBM)}});case"surfaceBlur":return Object.assign(Object.assign({},t),{type:"surface blur",filter:{radius:(0,w.parseUnits)(e.Fltr["Rds "]),threshold:e.Fltr.Thsh}});case"Dspl":return Object.assign(Object.assign({},t),{type:"displace",filter:{horizontalScale:e.Fltr.HrzS,verticalScale:e.Fltr.VrtS,displacementMap:w.DspM.decode(e.Fltr.DspM),undefinedAreas:w.UndA.decode(e.Fltr.UndA),displacementFile:{signature:e.Fltr.DspF.sig,path:e.Fltr.DspF.path}}});case"Pnch":return Object.assign(Object.assign({},t),{type:"pinch",filter:{amount:e.Fltr.Amnt}});case"Plr ":return Object.assign(Object.assign({},t),{type:"polar coordinates",filter:{conversion:w.Cnvr.decode(e.Fltr.Cnvr)}});case"Rple":return Object.assign(Object.assign({},t),{type:"ripple",filter:{amount:e.Fltr.Amnt,size:w.RplS.decode(e.Fltr.RplS)}});case"Shr ":return Object.assign(Object.assign({},t),{type:"shear",filter:{shearPoints:e.Fltr.ShrP.map(i=>({x:i.Hrzn,y:i.Vrtc})),shearStart:e.Fltr.ShrS,shearEnd:e.Fltr.ShrE,undefinedAreas:w.UndA.decode(e.Fltr.UndA)}});case"Sphr":return Object.assign(Object.assign({},t),{type:"spherize",filter:{amount:e.Fltr.Amnt,mode:w.SphM.decode(e.Fltr.SphM)}});case"Twrl":return Object.assign(Object.assign({},t),{type:"twirl",filter:{angle:e.Fltr.Angl}});case"Wave":return Object.assign(Object.assign({},t),{type:"wave",filter:{numberOfGenerators:e.Fltr.NmbG,type:w.Wvtp.decode(e.Fltr.Wvtp),wavelength:{min:e.Fltr.WLMn,max:e.Fltr.WLMx},amplitude:{min:e.Fltr.AmMn,max:e.Fltr.AmMx},scale:{x:e.Fltr.SclH,y:e.Fltr.SclV},randomSeed:e.Fltr.RndS,undefinedAreas:w.UndA.decode(e.Fltr.UndA)}});case"ZgZg":return Object.assign(Object.assign({},t),{type:"zigzag",filter:{amount:e.Fltr.Amnt,ridges:e.Fltr.NmbR,style:w.ZZTy.decode(e.Fltr.ZZTy)}});case"AdNs":return Object.assign(Object.assign({},t),{type:"add noise",filter:{amount:(0,w.parsePercent)(e.Fltr.Nose),distribution:w.Dstr.decode(e.Fltr.Dstr),monochromatic:e.Fltr.Mnch,randomSeed:e.Fltr.FlRs}});case"DstS":return Object.assign(Object.assign({},t),{type:"dust and scratches",filter:{radius:e.Fltr["Rds "],threshold:e.Fltr.Thsh}});case"Mdn ":return Object.assign(Object.assign({},t),{type:"median",filter:{radius:(0,w.parseUnits)(e.Fltr["Rds "])}});case"denoise":return Object.assign(Object.assign({},t),{type:"reduce noise",filter:{preset:e.Fltr.preset,removeJpegArtifact:e.Fltr.removeJPEGArtifact,reduceColorNoise:(0,w.parsePercent)(e.Fltr.ClNs),sharpenDetails:(0,w.parsePercent)(e.Fltr.Shrp),channelDenoise:e.Fltr.channelDenoise.map(i=>Object.assign({channels:i.Chnl.map(w.Chnl.decode),amount:i.Amnt},i.EdgF?{preserveDetails:i.EdgF}:{}))}});case"ClrH":return Object.assign(Object.assign({},t),{type:"color halftone",filter:{radius:e.Fltr["Rds "],angle1:e.Fltr.Ang1,angle2:e.Fltr.Ang2,angle3:e.Fltr.Ang3,angle4:e.Fltr.Ang4}});case"Crst":return Object.assign(Object.assign({},t),{type:"crystallize",filter:{cellSize:e.Fltr.ClSz,randomSeed:e.Fltr.FlRs}});case"Mztn":return Object.assign(Object.assign({},t),{type:"mezzotint",filter:{type:w.MztT.decode(e.Fltr.MztT),randomSeed:e.Fltr.FlRs}});case"Msc ":return Object.assign(Object.assign({},t),{type:"mosaic",filter:{cellSize:(0,w.parseUnits)(e.Fltr.ClSz)}});case"Pntl":return Object.assign(Object.assign({},t),{type:"pointillize",filter:{cellSize:e.Fltr.ClSz,randomSeed:e.Fltr.FlRs}});case"Clds":return Object.assign(Object.assign({},t),{type:"clouds",filter:{randomSeed:e.Fltr.FlRs}});case"DfrC":return Object.assign(Object.assign({},t),{type:"difference clouds",filter:{randomSeed:e.Fltr.FlRs}});case"Fbrs":return Object.assign(Object.assign({},t),{type:"fibers",filter:{variance:e.Fltr.Vrnc,strength:e.Fltr.Strg,randomSeed:e.Fltr.RndS}});case"LnsF":return Object.assign(Object.assign({},t),{type:"lens flare",filter:{brightness:e.Fltr.Brgh,position:{x:e.Fltr.FlrC.Hrzn,y:e.Fltr.FlrC.Vrtc},lensType:w.Lns.decode(e.Fltr["Lns "])}});case"smartSharpen":return Object.assign(Object.assign({},t),{type:"smart sharpen",filter:{amount:(0,w.parsePercent)(e.Fltr.Amnt),radius:(0,w.parseUnits)(e.Fltr["Rds "]),threshold:e.Fltr.Thsh,angle:e.Fltr.Angl,moreAccurate:e.Fltr.moreAccurate,blur:w.blurType.decode(e.Fltr.blur),preset:e.Fltr.preset,shadow:{fadeAmount:(0,w.parsePercent)(e.Fltr.sdwM.Amnt),tonalWidth:(0,w.parsePercent)(e.Fltr.sdwM.Wdth),radius:e.Fltr.sdwM["Rds "]},highlight:{fadeAmount:(0,w.parsePercent)(e.Fltr.hglM.Amnt),tonalWidth:(0,w.parsePercent)(e.Fltr.hglM.Wdth),radius:e.Fltr.hglM["Rds "]}}});case"UnsM":return Object.assign(Object.assign({},t),{type:"unsharp mask",filter:{amount:(0,w.parsePercent)(e.Fltr.Amnt),radius:(0,w.parseUnits)(e.Fltr["Rds "]),threshold:e.Fltr.Thsh}});case"Dfs ":return Object.assign(Object.assign({},t),{type:"diffuse",filter:{mode:w.DfsM.decode(e.Fltr["Md  "]),randomSeed:e.Fltr.FlRs}});case"Embs":return Object.assign(Object.assign({},t),{type:"emboss",filter:{angle:e.Fltr.Angl,height:e.Fltr.Hght,amount:e.Fltr.Amnt}});case"Extr":return Object.assign(Object.assign({},t),{type:"extrude",filter:{type:w.ExtT.decode(e.Fltr.ExtT),size:e.Fltr.ExtS,depth:e.Fltr.ExtD,depthMode:w.ExtR.decode(e.Fltr.ExtR),randomSeed:e.Fltr.FlRs,solidFrontFaces:e.Fltr.ExtF,maskIncompleteBlocks:e.Fltr.ExtM}});case"Tls ":return Object.assign(Object.assign({},t),{type:"tiles",filter:{numberOfTiles:e.Fltr.TlNm,maximumOffset:e.Fltr.TlOf,fillEmptyAreaWith:w.FlCl.decode(e.Fltr.FlCl),randomSeed:e.Fltr.FlRs}});case"TrcC":return Object.assign(Object.assign({},t),{type:"trace contour",filter:{level:e.Fltr["Lvl "],edge:w.CntE.decode(e.Fltr["Edg "])}});case"Wnd ":return Object.assign(Object.assign({},t),{type:"wind",filter:{method:w.WndM.decode(e.Fltr.WndM),direction:w.Drct.decode(e.Fltr.Drct)}});case"Dntr":return Object.assign(Object.assign({},t),{type:"de-interlace",filter:{eliminate:w.IntE.decode(e.Fltr.IntE),newFieldsBy:w.IntC.decode(e.Fltr.IntC)}});case"Cstm":return Object.assign(Object.assign({},t),{type:"custom",filter:{scale:e.Fltr["Scl "],offset:e.Fltr.Ofst,matrix:e.Fltr.Mtrx}});case"HghP":return Object.assign(Object.assign({},t),{type:"high pass",filter:{radius:(0,w.parseUnits)(e.Fltr["Rds "])}});case"Mxm ":return Object.assign(Object.assign({},t),{type:"maximum",filter:{radius:(0,w.parseUnits)(e.Fltr["Rds "])}});case"Mnm ":return Object.assign(Object.assign({},t),{type:"minimum",filter:{radius:(0,w.parseUnits)(e.Fltr["Rds "])}});case"Ofst":return Object.assign(Object.assign({},t),{type:"offset",filter:{horizontal:e.Fltr.Hrzn,vertical:e.Fltr.Vrtc,undefinedAreas:w.FlMd.decode(e.Fltr["Fl  "])}});case"rigidTransform":return Object.assign(Object.assign({},t),{type:"puppet",filter:{rigidType:e.Fltr.rigidType,bounds:[{x:e.Fltr.PuX0,y:e.Fltr.PuY0},{x:e.Fltr.PuX1,y:e.Fltr.PuY1},{x:e.Fltr.PuX2,y:e.Fltr.PuY2},{x:e.Fltr.PuX3,y:e.Fltr.PuY3}],puppetShapeList:e.Fltr.puppetShapeList.map(i=>({rigidType:i.rigidType,originalVertexArray:Hl(i.originalVertexArray),deformedVertexArray:Hl(i.deformedVertexArray),indexArray:Array.from(V0(i.indexArray)),pinOffsets:qi(i.pinOffsets),posFinalPins:qi(i.posFinalPins),pinVertexIndices:i.pinVertexIndices,selectedPin:i.selectedPin,pinPosition:qi(i.PinP),pinRotation:i.PnRt,pinOverlay:i.PnOv,pinDepth:i.PnDp,meshQuality:i.meshQuality,meshExpansion:i.meshExpansion,meshRigidity:i.meshRigidity,imageResolution:i.imageResolution,meshBoundaryPath:{pathComponents:i.meshBoundaryPath.pathComponents.map(o=>({shapeOperation:o.shapeOperation.split(".")[1],paths:o.SbpL.map(r=>({closed:r.Clsp,points:r["Pts "].map(s=>({anchor:$n(s.Anch),forward:$n(s["Fwd "]),backward:$n(s["Bwd "]),smooth:s.Smoo}))}))}))}}))}});case"PbPl":{let i=[],o=e.Fltr;for(let r=0;r<Ve.length&&o[`PN${Ve[r]}a`];r++)for(let s=0;s<Ve.length&&o[`PN${Ve[r]}${Ve[s]}`];s++)i.push({name:o[`PN${Ve[r]}${Ve[s]}`],value:o[`PF${Ve[r]}${Ve[s]}`]});return Object.assign(Object.assign({},t),{type:"oil paint plugin",filter:{name:e.Fltr.KnNm,gpu:e.Fltr.GpuY,lighting:e.Fltr.LIWy,parameters:i}})}case"HsbP":return Object.assign(Object.assign({},t),{type:"hsb/hsl",filter:{inputMode:w.ClrS.decode(e.Fltr.Inpt),rowOrder:w.ClrS.decode(e.Fltr.Otpt)}});case"oilPaint":return Object.assign(Object.assign({},t),{type:"oil paint",filter:{lightingOn:e.Fltr.lightingOn,stylization:e.Fltr.stylization,cleanliness:e.Fltr.cleanliness,brushScale:e.Fltr.brushScale,microBrush:e.Fltr.microBrush,lightDirection:e.Fltr.LghD,specularity:e.Fltr.specularity}});case"LqFy":return Object.assign(Object.assign({},t),{type:"liquify",filter:{liquifyMesh:e.Fltr.LqMe}});case"perspectiveWarpTransform":return Object.assign(Object.assign({},t),{type:"perspective warp",filter:{vertices:e.Fltr.vertices.map($n),warpedVertices:e.Fltr.warpedVertices.map($n),quads:e.Fltr.quads.map(i=>i.indices)}});case"Crvs":return Object.assign(Object.assign({},t),{type:"curves",filter:Object.assign({presetKind:w.presetKindType.decode(e.Fltr.presetKind)},e.Fltr.Adjs?{adjustments:e.Fltr.Adjs.map(i=>{let o=i.Chnl.map(w.Chnl.decode);if(i["Crv "])return{channels:o,curve:i["Crv "].map(r=>{let s={x:r.Hrzn,y:r.Vrtc};return r.Cnty&&(s.curved=!0),s})};if(i.Mpng)return{channels:o,values:i.Mpng};throw new Error("Unknown curve adjustment")})}:{})});case"BrgC":return Object.assign(Object.assign({},t),{type:"brightness/contrast",filter:{brightness:e.Fltr.Brgh,contrast:e.Fltr.Cntr,useLegacy:!!e.Fltr.useLegacy}});default:if(n.throwForMissingFeatures)throw new Error(`Unknown filter classId: ${e.Fltr._classID}`);return}else switch(e.filterID){case 1098281575:return Object.assign(Object.assign({},t),{type:"average"});case 1114403360:return Object.assign(Object.assign({},t),{type:"blur"});case 1114403405:return Object.assign(Object.assign({},t),{type:"blur more"});case 1148416099:return Object.assign(Object.assign({},t),{type:"despeckle"});case 1180922912:return Object.assign(Object.assign({},t),{type:"facet"});case 1181902701:return Object.assign(Object.assign({},t),{type:"fragment"});case 1399353968:return Object.assign(Object.assign({},t),{type:"sharpen"});case 1399353925:return Object.assign(Object.assign({},t),{type:"sharpen edges"});case 1399353933:return Object.assign(Object.assign({},t),{type:"sharpen more"});case 1181639749:return Object.assign(Object.assign({},t),{type:"find edges"});case 1399616122:return Object.assign(Object.assign({},t),{type:"solarize"});case 1314149187:return Object.assign(Object.assign({},t),{type:"ntsc colors"});case 1231976050:return Object.assign(Object.assign({},t),{type:"invert"});default:if(n.throwForMissingFeatures)throw new Error(`Unknown filterID: ${e.filterID}`)}}function H0(e,n){return{enabled:e.enab,validAtPosition:e.validAtPosition,maskEnabled:e.filterMaskEnable,maskLinked:e.filterMaskLinked,maskExtendWithWhite:e.filterMaskExtendWithWhite,list:e.filterFXList.map(t=>G0(t,n)).filter(t=>!!t)}}function pt(e){return(0,w.unitsValue)(e.radius,"radius")}function W0(e){let n={_name:"",_classID:"filterFX","Nm  ":e.name,blendOptions:{_name:"",_classID:"blendOptions",Opct:(0,w.unitsPercentF)(e.opacity),"Md  ":w.BlnM.encode(e.blendMode)},enab:e.enabled,hasoptions:e.hasOptions,FrgC:(0,w.serializeColor)(e.foregroundColor),BckC:(0,w.serializeColor)(e.backgroundColor)};switch(e.type){case"average":return Object.assign(Object.assign({},n),{filterID:1098281575});case"blur":return Object.assign(Object.assign({},n),{filterID:1114403360});case"blur more":return Object.assign(Object.assign({},n),{filterID:1114403405});case"box blur":return Object.assign(Object.assign({},n),{Fltr:{_name:"Box Blur",_classID:"boxblur","Rds ":pt(e.filter)},filterID:697});case"gaussian blur":return Object.assign(Object.assign({},n),{Fltr:{_name:"Gaussian Blur",_classID:"GsnB","Rds ":pt(e.filter)},filterID:1198747202});case"motion blur":return Object.assign(Object.assign({},n),{Fltr:{_name:"Motion Blur",_classID:"MtnB",Angl:e.filter.angle,Dstn:(0,w.unitsValue)(e.filter.distance,"distance")},filterID:1299476034});case"radial blur":return Object.assign(Object.assign({},n),{Fltr:{_name:"Radial Blur",_classID:"RdlB",Amnt:e.filter.amount,BlrM:w.BlrM.encode(e.filter.method),BlrQ:w.BlrQ.encode(e.filter.quality)},filterID:1382313026});case"shape blur":return Object.assign(Object.assign({},n),{Fltr:{_name:"Shape Blur",_classID:"shapeBlur","Rds ":pt(e.filter),customShape:{_name:"",_classID:"customShape","Nm  ":e.filter.customShape.name,Idnt:e.filter.customShape.id}},filterID:702});case"smart blur":return Object.assign(Object.assign({},n),{Fltr:{_name:"Smart Blur",_classID:"SmrB","Rds ":e.filter.radius,Thsh:e.filter.threshold,SmBQ:w.SmBQ.encode(e.filter.quality),SmBM:w.SmBM.encode(e.filter.mode)},filterID:1399681602});case"surface blur":return Object.assign(Object.assign({},n),{Fltr:{_name:"Surface Blur",_classID:"surfaceBlur","Rds ":pt(e.filter),Thsh:e.filter.threshold},filterID:701});case"displace":return Object.assign(Object.assign({},n),{Fltr:{_name:"Displace",_classID:"Dspl",HrzS:e.filter.horizontalScale,VrtS:e.filter.verticalScale,DspM:w.DspM.encode(e.filter.displacementMap),UndA:w.UndA.encode(e.filter.undefinedAreas),DspF:{sig:e.filter.displacementFile.signature,path:e.filter.displacementFile.path}},filterID:1148416108});case"pinch":return Object.assign(Object.assign({},n),{Fltr:{_name:"Pinch",_classID:"Pnch",Amnt:e.filter.amount},filterID:1349411688});case"polar coordinates":return Object.assign(Object.assign({},n),{Fltr:{_name:"Polar Coordinates",_classID:"Plr ",Cnvr:w.Cnvr.encode(e.filter.conversion)},filterID:1349284384});case"ripple":return Object.assign(Object.assign({},n),{Fltr:{_name:"Ripple",_classID:"Rple",Amnt:e.filter.amount,RplS:w.RplS.encode(e.filter.size)},filterID:1383099493});case"shear":return Object.assign(Object.assign({},n),{Fltr:{_name:"Shear",_classID:"Shr ",ShrP:e.filter.shearPoints.map(t=>({_name:"",_classID:"Pnt ",Hrzn:t.x,Vrtc:t.y})),UndA:w.UndA.encode(e.filter.undefinedAreas),ShrS:e.filter.shearStart,ShrE:e.filter.shearEnd},filterID:1399353888});case"spherize":return Object.assign(Object.assign({},n),{Fltr:{_name:"Spherize",_classID:"Sphr",Amnt:e.filter.amount,SphM:w.SphM.encode(e.filter.mode)},filterID:1399875698});case"twirl":return Object.assign(Object.assign({},n),{Fltr:{_name:"Twirl",_classID:"Twrl",Angl:e.filter.angle},filterID:1417114220});case"wave":return Object.assign(Object.assign({},n),{Fltr:{_name:"Wave",_classID:"Wave",Wvtp:w.Wvtp.encode(e.filter.type),NmbG:e.filter.numberOfGenerators,WLMn:e.filter.wavelength.min,WLMx:e.filter.wavelength.max,AmMn:e.filter.amplitude.min,AmMx:e.filter.amplitude.max,SclH:e.filter.scale.x,SclV:e.filter.scale.y,UndA:w.UndA.encode(e.filter.undefinedAreas),RndS:e.filter.randomSeed},filterID:1466005093});case"zigzag":return Object.assign(Object.assign({},n),{Fltr:{_name:"ZigZag",_classID:"ZgZg",Amnt:e.filter.amount,NmbR:e.filter.ridges,ZZTy:w.ZZTy.encode(e.filter.style)},filterID:1516722791});case"add noise":return Object.assign(Object.assign({},n),{Fltr:{_name:"Add Noise",_classID:"AdNs",Dstr:w.Dstr.encode(e.filter.distribution),Nose:(0,w.unitsPercentF)(e.filter.amount),Mnch:e.filter.monochromatic,FlRs:e.filter.randomSeed},filterID:1097092723});case"despeckle":return Object.assign(Object.assign({},n),{filterID:1148416099});case"dust and scratches":return Object.assign(Object.assign({},n),{Fltr:{_name:"Dust & Scratches",_classID:"DstS","Rds ":e.filter.radius,Thsh:e.filter.threshold},filterID:1148417107});case"median":return Object.assign(Object.assign({},n),{Fltr:{_name:"Median",_classID:"Mdn ","Rds ":pt(e.filter)},filterID:1298427424});case"reduce noise":return Object.assign(Object.assign({},n),{Fltr:{_name:"Reduce Noise",_classID:"denoise",ClNs:(0,w.unitsPercentF)(e.filter.reduceColorNoise),Shrp:(0,w.unitsPercentF)(e.filter.sharpenDetails),removeJPEGArtifact:e.filter.removeJpegArtifact,channelDenoise:e.filter.channelDenoise.map(t=>Object.assign({_name:"",_classID:"channelDenoiseParams",Chnl:t.channels.map(i=>w.Chnl.encode(i)),Amnt:t.amount},t.preserveDetails?{EdgF:t.preserveDetails}:{})),preset:e.filter.preset},filterID:633});case"color halftone":return Object.assign(Object.assign({},n),{Fltr:{_name:"Color Halftone",_classID:"ClrH","Rds ":e.filter.radius,Ang1:e.filter.angle1,Ang2:e.filter.angle2,Ang3:e.filter.angle3,Ang4:e.filter.angle4},filterID:1131180616});case"crystallize":return Object.assign(Object.assign({},n),{Fltr:{_name:"Crystallize",_classID:"Crst",ClSz:e.filter.cellSize,FlRs:e.filter.randomSeed},filterID:1131574132});case"facet":return Object.assign(Object.assign({},n),{filterID:1180922912});case"fragment":return Object.assign(Object.assign({},n),{filterID:1181902701});case"mezzotint":return Object.assign(Object.assign({},n),{Fltr:{_name:"Mezzotint",_classID:"Mztn",MztT:w.MztT.encode(e.filter.type),FlRs:e.filter.randomSeed},filterID:1299870830});case"mosaic":return Object.assign(Object.assign({},n),{Fltr:{_name:"Mosaic",_classID:"Msc ",ClSz:(0,w.unitsValue)(e.filter.cellSize,"cellSize")},filterID:1299407648});case"pointillize":return Object.assign(Object.assign({},n),{Fltr:{_name:"Pointillize",_classID:"Pntl",ClSz:e.filter.cellSize,FlRs:e.filter.randomSeed},filterID:1349416044});case"clouds":return Object.assign(Object.assign({},n),{Fltr:{_name:"Clouds",_classID:"Clds",FlRs:e.filter.randomSeed},filterID:1131177075});case"difference clouds":return Object.assign(Object.assign({},n),{Fltr:{_name:"Difference Clouds",_classID:"DfrC",FlRs:e.filter.randomSeed},filterID:1147564611});case"fibers":return Object.assign(Object.assign({},n),{Fltr:{_name:"Fibers",_classID:"Fbrs",Vrnc:e.filter.variance,Strg:e.filter.strength,RndS:e.filter.randomSeed},filterID:1180856947});case"lens flare":return Object.assign(Object.assign({},n),{Fltr:{_name:"Lens Flare",_classID:"LnsF",Brgh:e.filter.brightness,FlrC:{_name:"",_classID:"Pnt ",Hrzn:e.filter.position.x,Vrtc:e.filter.position.y},"Lns ":w.Lns.encode(e.filter.lensType)},filterID:1282306886});case"sharpen":return Object.assign(Object.assign({},n),{filterID:1399353968});case"sharpen edges":return Object.assign(Object.assign({},n),{filterID:1399353925});case"sharpen more":return Object.assign(Object.assign({},n),{filterID:1399353933});case"smart sharpen":return Object.assign(Object.assign({},n),{Fltr:{_name:"Smart Sharpen",_classID:"smartSharpen",Amnt:(0,w.unitsPercentF)(e.filter.amount),"Rds ":pt(e.filter),Thsh:e.filter.threshold,Angl:e.filter.angle,moreAccurate:e.filter.moreAccurate,blur:w.blurType.encode(e.filter.blur),preset:e.filter.preset,sdwM:{_name:"Parameters",_classID:"adaptCorrectTones",Amnt:(0,w.unitsPercentF)(e.filter.shadow.fadeAmount),Wdth:(0,w.unitsPercentF)(e.filter.shadow.tonalWidth),"Rds ":e.filter.shadow.radius},hglM:{_name:"Parameters",_classID:"adaptCorrectTones",Amnt:(0,w.unitsPercentF)(e.filter.highlight.fadeAmount),Wdth:(0,w.unitsPercentF)(e.filter.highlight.tonalWidth),"Rds ":e.filter.highlight.radius}},filterID:698});case"unsharp mask":return Object.assign(Object.assign({},n),{Fltr:{_name:"Unsharp Mask",_classID:"UnsM",Amnt:(0,w.unitsPercentF)(e.filter.amount),"Rds ":pt(e.filter),Thsh:e.filter.threshold},filterID:1433301837});case"diffuse":return Object.assign(Object.assign({},n),{Fltr:{_name:"Diffuse",_classID:"Dfs ","Md  ":w.DfsM.encode(e.filter.mode),FlRs:e.filter.randomSeed},filterID:1147564832});case"emboss":return Object.assign(Object.assign({},n),{Fltr:{_name:"Emboss",_classID:"Embs",Angl:e.filter.angle,Hght:e.filter.height,Amnt:e.filter.amount},filterID:1164796531});case"extrude":return Object.assign(Object.assign({},n),{Fltr:{_name:"Extrude",_classID:"Extr",ExtS:e.filter.size,ExtD:e.filter.depth,ExtF:e.filter.solidFrontFaces,ExtM:e.filter.maskIncompleteBlocks,ExtT:w.ExtT.encode(e.filter.type),ExtR:w.ExtR.encode(e.filter.depthMode),FlRs:e.filter.randomSeed},filterID:1165522034});case"find edges":return Object.assign(Object.assign({},n),{filterID:1181639749});case"solarize":return Object.assign(Object.assign({},n),{filterID:1399616122});case"tiles":return Object.assign(Object.assign({},n),{Fltr:{_name:"Tiles",_classID:"Tls ",TlNm:e.filter.numberOfTiles,TlOf:e.filter.maximumOffset,FlCl:w.FlCl.encode(e.filter.fillEmptyAreaWith),FlRs:e.filter.randomSeed},filterID:1416393504});case"trace contour":return Object.assign(Object.assign({},n),{Fltr:{_name:"Trace Contour",_classID:"TrcC","Lvl ":e.filter.level,"Edg ":w.CntE.encode(e.filter.edge)},filterID:1416782659});case"wind":return Object.assign(Object.assign({},n),{Fltr:{_name:"Wind",_classID:"Wnd ",WndM:w.WndM.encode(e.filter.method),Drct:w.Drct.encode(e.filter.direction)},filterID:1466852384});case"de-interlace":return Object.assign(Object.assign({},n),{Fltr:{_name:"De-Interlace",_classID:"Dntr",IntE:w.IntE.encode(e.filter.eliminate),IntC:w.IntC.encode(e.filter.newFieldsBy)},filterID:1148089458});case"ntsc colors":return Object.assign(Object.assign({},n),{filterID:1314149187});case"invert":return Object.assign(Object.assign({},n),{filterID:1231976050});case"custom":return Object.assign(Object.assign({},n),{Fltr:{_name:"Custom",_classID:"Cstm","Scl ":e.filter.scale,Ofst:e.filter.offset,Mtrx:e.filter.matrix},filterID:1131639917});case"high pass":return Object.assign(Object.assign({},n),{Fltr:{_name:"High Pass",_classID:"HghP","Rds ":pt(e.filter)},filterID:1214736464});case"maximum":return Object.assign(Object.assign({},n),{Fltr:{_name:"Maximum",_classID:"Mxm ","Rds ":pt(e.filter)},filterID:1299737888});case"minimum":return Object.assign(Object.assign({},n),{Fltr:{_name:"Minimum",_classID:"Mnm ","Rds ":pt(e.filter)},filterID:1299082528});case"offset":return Object.assign(Object.assign({},n),{Fltr:{_name:"Offset",_classID:"Ofst",Hrzn:e.filter.horizontal,Vrtc:e.filter.vertical,"Fl  ":w.FlMd.encode(e.filter.undefinedAreas)},filterID:1332114292});case"puppet":return Object.assign(Object.assign({},n),{Fltr:{_name:"Rigid Transform",_classID:"rigidTransform",null:["Ordn.Trgt"],rigidType:e.filter.rigidType,puppetShapeList:e.filter.puppetShapeList.map(t=>({_name:"",_classID:"puppetShape",rigidType:t.rigidType,VrsM:1,VrsN:0,originalVertexArray:yr(new Float32Array(Wn(t.originalVertexArray))),deformedVertexArray:yr(new Float32Array(Wn(t.deformedVertexArray))),indexArray:yr(new Uint32Array(t.indexArray)),pinOffsets:Wn(t.pinOffsets),posFinalPins:Wn(t.posFinalPins),pinVertexIndices:t.pinVertexIndices,PinP:Wn(t.pinPosition),PnRt:t.pinRotation,PnOv:t.pinOverlay,PnDp:t.pinDepth,meshQuality:t.meshQuality,meshExpansion:t.meshExpansion,meshRigidity:t.meshRigidity,imageResolution:t.imageResolution,meshBoundaryPath:{_name:"",_classID:"pathClass",pathComponents:t.meshBoundaryPath.pathComponents.map(i=>({_name:"",_classID:"PaCm",shapeOperation:`shapeOperation.${i.shapeOperation}`,SbpL:i.paths.map(o=>({_name:"",_classID:"Sbpl",Clsp:o.closed,"Pts ":o.points.map(r=>({_name:"",_classID:"Pthp",Anch:Zn(r.anchor),"Fwd ":Zn(r.forward),"Bwd ":Zn(r.backward),Smoo:r.smooth}))}))}))},selectedPin:t.selectedPin})),PuX0:e.filter.bounds[0].x,PuX1:e.filter.bounds[1].x,PuX2:e.filter.bounds[2].x,PuX3:e.filter.bounds[3].x,PuY0:e.filter.bounds[0].y,PuY1:e.filter.bounds[1].y,PuY2:e.filter.bounds[2].y,PuY3:e.filter.bounds[3].y},filterID:991});case"oil paint plugin":{let t={};for(let i=0;i<e.filter.parameters.length;i++){let{name:o,value:r}=e.filter.parameters[i],s=`${Ve[Math.floor(i/Ve.length)]}${Ve[i%Ve.length]}`;t[`PN${s}`]=o,t[`PT${s}`]=0,t[`PF${s}`]=r}return Object.assign(Object.assign({},n),{Fltr:Object.assign({_name:"Oil Paint Plugin",_classID:"PbPl",KnNm:e.filter.name,GpuY:e.filter.gpu,LIWy:e.filter.lighting,FPth:"1"},t),filterID:1348620396})}case"oil paint":return Object.assign(Object.assign({},n),{Fltr:{_name:"Oil Paint",_classID:"oilPaint",lightingOn:e.filter.lightingOn,stylization:e.filter.stylization,cleanliness:e.filter.cleanliness,brushScale:e.filter.brushScale,microBrush:e.filter.microBrush,LghD:e.filter.lightDirection,specularity:e.filter.specularity},filterID:1122});case"liquify":return Object.assign(Object.assign({},n),{Fltr:{_name:"Liquify",_classID:"LqFy",LqMe:e.filter.liquifyMesh},filterID:1282492025});case"perspective warp":return Object.assign(Object.assign({},n),{Fltr:{_name:"Perspective Warp",_classID:"perspectiveWarpTransform",vertices:e.filter.vertices.map(Zn),warpedVertices:e.filter.warpedVertices.map(Zn),quads:e.filter.quads.map(t=>({indices:t}))},filterID:442});case"curves":return Object.assign(Object.assign({},n),{Fltr:Object.assign({_name:"Curves",_classID:"Crvs",presetKind:w.presetKindType.encode(e.filter.presetKind)},e.filter.adjustments?{Adjs:e.filter.adjustments.map(t=>"curve"in t?{_name:"",_classID:"CrvA",Chnl:t.channels.map(w.Chnl.encode),"Crv ":t.curve.map(i=>Object.assign({_name:"",_classID:"Pnt ",Hrzn:i.x,Vrtc:i.y},i.curved?{Cnty:!0}:{}))}:{_name:"",_classID:"CrvA",Chnl:t.channels.map(w.Chnl.encode),Mpng:t.values})}:{}),filterID:1131574899});case"brightness/contrast":return Object.assign(Object.assign({},n),{Fltr:{_name:"Brightness/Contrast",_classID:"BrgC",Brgh:e.filter.brightness,Cntr:e.filter.contrast,useLegacy:!!e.filter.useLegacy},filterID:1114793795});default:throw new Error(`Unknow filter type: ${e.type}`)}}function Ql(e){if(e.warp)return e.warp;if(!e.width||!e.height)throw new Error("You must provide width and height of the linked image in placedLayer");let n=e.width,t=e.height,i=0,o=n/3,r=n*2/3,s=n,a=0,l=t/3,c=t*2/3,d=t;return{style:"custom",value:0,perspective:0,perspectiveOther:0,rotate:"horizontal",bounds:{top:{value:0,units:"Pixels"},left:{value:0,units:"Pixels"},bottom:{value:t,units:"Pixels"},right:{value:n,units:"Pixels"}},uOrder:4,vOrder:4,customEnvelopeWarp:{meshPoints:[{x:i,y:a},{x:o,y:a},{x:r,y:a},{x:s,y:a},{x:i,y:l},{x:o,y:l},{x:r,y:l},{x:s,y:l},{x:i,y:c},{x:o,y:c},{x:r,y:c},{x:s,y:c},{x:i,y:d},{x:o,y:d},{x:r,y:d},{x:s,y:d}]}}}P("SoLd",re("placedLayer"),(e,n,t)=>{if((0,g.readSignature)(e)!=="soLD")throw new Error("Invalid SoLd type");let i=(0,g.readInt32)(e);if(i!==4&&i!==5)throw new Error("Invalid SoLd version");let o=(0,w.readVersionAndDescriptor)(e,!0);n.placedLayer={id:o.Idnt,placed:o.placed,type:Sn[o.Type],pageNumber:o.PgNm,totalPages:o.totalPages,frameStep:(0,w.frac)(o.frameStep),duration:(0,w.frac)(o.duration),frameCount:o.frameCount,transform:o.Trnf,width:o["Sz  "].Wdth,height:o["Sz  "].Hght,resolution:(0,w.parseUnits)(o.Rslt),warp:Jl(o.quiltWarp||o.warp)},o.nonAffineTransform&&o.nonAffineTransform.some((r,s)=>r!==o.Trnf[s])&&(n.placedLayer.nonAffineTransform=o.nonAffineTransform),o.Crop&&(n.placedLayer.crop=o.Crop),o.comp&&(n.placedLayer.comp=o.comp),o.compInfo&&(n.placedLayer.compInfo={compID:o.compInfo.compID,originalCompID:o.compInfo.originalCompID}),o.filterFX&&(n.placedLayer.filter=H0(o.filterFX,e)),(0,g.skipBytes)(e,t())},(e,n)=>{var t,i;(0,m.writeSignature)(e,"soLD"),(0,m.writeInt32)(e,4);let o=n.placedLayer;if(!o.id||typeof o.id!="string"||!/^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(o.id))throw new Error("Placed layer ID must be in a GUID format (example: 20953ddb-9391-11ec-b4f1-c15674f50bc4)");let r=Object.assign(Object.assign({Idnt:o.id,placed:(t=o.placed)!==null&&t!==void 0?t:o.id,PgNm:o.pageNumber||1,totalPages:o.totalPages||1},o.crop?{Crop:o.crop}:{}),{frameStep:o.frameStep||{numerator:0,denominator:600},duration:o.duration||{numerator:0,denominator:600},frameCount:o.frameCount||0,Annt:16,Type:Sn.indexOf(o.type),Trnf:o.transform,nonAffineTransform:(i=o.nonAffineTransform)!==null&&i!==void 0?i:o.transform,warp:Ki(Ql(o)),"Sz  ":{_name:"",_classID:"Pnt ",Wdth:o.width||0,Hght:o.height||0},Rslt:o.resolution?(0,w.unitsValue)(o.resolution,"resolution"):{units:"Density",value:72}});if(o.filter&&(r.filterFX={_name:"",_classID:"filterFXStyle",enab:o.filter.enabled,validAtPosition:o.filter.validAtPosition,filterMaskEnable:o.filter.maskEnabled,filterMaskLinked:o.filter.maskLinked,filterMaskExtendWithWhite:o.filter.maskExtendWithWhite,filterFXList:o.filter.list.map(s=>W0(s))}),o.warp&&xr(o.warp)){let s=Ki(o.warp);r.quiltWarp=s,r.warp={warpStyle:"warpStyle.warpNone",warpValue:s.warpValue,warpPerspective:s.warpPerspective,warpPerspectiveOther:s.warpPerspectiveOther,warpRotate:s.warpRotate,bounds:s.bounds,uOrder:s.uOrder,vOrder:s.vOrder}}else delete r.quiltWarp;o.comp&&(r.comp=o.comp),o.compInfo&&(r.compInfo=o.compInfo),(0,w.writeVersionAndDescriptor)(e,"","null",r,r.quiltWarp?"quiltWarp":"warp")});Tt("SoLE","SoLd");P("fxrp",re("referencePoint"),(e,n)=>{n.referencePoint={x:(0,g.readFloat64)(e),y:(0,g.readFloat64)(e)}},(e,n)=>{(0,m.writeFloat64)(e,n.referencePoint.x),(0,m.writeFloat64)(e,n.referencePoint.y)});P("Lr16",()=>!1,(e,n,t,i,o)=>{(0,g.readLayerInfo)(e,i,o)},(e,n)=>{});P("Lr32",()=>!1,(e,n,t,i,o)=>{(0,g.readLayerInfo)(e,i,o)},(e,n)=>{});P("LMsk",re("userMask"),(e,n)=>{if(n.userMask={colorSpace:(0,g.readColor)(e),opacity:(0,g.readUint16)(e)/255},(0,g.readUint8)(e)!==128)throw new Error("Invalid flag value");(0,g.skipBytes)(e,1)},(e,n)=>{let t=n.userMask;(0,m.writeColor)(e,t.colorSpace),(0,m.writeUint16)(e,(0,Ge.clamp)(t.opacity,0,1)*255),(0,m.writeUint8)(e,128),(0,m.writeZeros)(e,1)});Ge.MOCK_HANDLERS?P("Patt",e=>e._Patt!==void 0,(e,n,t)=>{n._Patt=(0,g.readBytes)(e,t())},(e,n)=>!1):P("Patt",e=>!!(e.patterns&&e.patterns.length>0),(e,n,t)=>{for(;t()>0;){let i=(0,g.readPattern)(e);n.patterns===void 0&&(n.patterns=[]),n.patterns.push(i)}},(e,n,t,i)=>{let o=n.patterns||[];for(let r of o)(0,m.writePattern)(e,r)});Tt("Pat2","Patt");Tt("Pat3","Patt");Ge.MOCK_HANDLERS&&P("CAI ",e=>e._CAI_!==void 0,(e,n,t)=>{n._CAI_=(0,g.readBytes)(e,t())},(e,n)=>{(0,m.writeBytes)(e,n._CAI_)});Ge.MOCK_HANDLERS&&P("OCIO",e=>e._OCIO!==void 0,(e,n,t)=>{n._OCIO=(0,g.readBytes)(e,t())},(e,n)=>{(0,m.writeBytes)(e,n._OCIO)});Ge.MOCK_HANDLERS&&P("GenI",e=>e._GenI!==void 0,(e,n,t)=>{n._GenI=(0,g.readBytes)(e,t())},(e,n)=>{(0,m.writeBytes)(e,n._GenI)});function Wl(e){let n=(0,g.readInt32)(e),t=(0,g.readInt32)(e),i=(0,g.readInt32)(e),o=(0,g.readInt32)(e);return{top:n,left:t,bottom:i,right:o}}function $l(e,n){(0,m.writeInt32)(e,n.top),(0,m.writeInt32)(e,n.left),(0,m.writeInt32)(e,n.bottom),(0,m.writeInt32)(e,n.right)}P("Anno",e=>e.annotations!==void 0,(e,n,t)=>{let i=(0,g.readUint16)(e),o=(0,g.readUint16)(e);if(i!==2||o!==1)throw new Error("Invalid Anno version");let r=(0,g.readUint32)(e),s=[];for(let a=0;a<r;a++){(0,g.readUint32)(e);let l=(0,g.readSignature)(e),c=!!(0,g.readUint8)(e);(0,g.readUint8)(e),(0,g.readUint16)(e);let d=Wl(e),h=Wl(e),f=(0,g.readColor)(e),u=(0,g.readPascalString)(e,2),p=(0,g.readPascalString)(e,2),_=(0,g.readPascalString)(e,2);(0,g.readUint32)(e),(0,g.readSignature)(e);let b=(0,g.readUint32)(e),y;if(l==="txtA")b>=2&&(0,g.readUint16)(e)===65279?y=(0,g.readUnicodeStringWithLength)(e,(b-2)/2):(e.offset-=2,y=(0,g.readAsciiString)(e,b)),y=y.replace(/\\r/g,`\n`);else if(l==="sndA")y=(0,g.readBytes)(e,b);else throw new Error("Unknown annotation type");s.push({type:l==="txtA"?"text":"sound",open:c,iconLocation:d,popupLocation:h,color:f,author:u,name:p,date:_,data:y})}n.annotations=s,(0,g.skipBytes)(e,t())},(e,n)=>{let t=n.annotations;(0,m.writeUint16)(e,2),(0,m.writeUint16)(e,1),(0,m.writeUint32)(e,t.length);for(let i of t){let o=i.type==="sound";if(o&&!(i.data instanceof Uint8Array))throw new Error("Sound annotation data should be Uint8Array");if(!o&&typeof i.data!="string")throw new Error("Text annotation data should be string");let r=e.offset;(0,m.writeUint32)(e,0),(0,m.writeSignature)(e,o?"sndA":"txtA"),(0,m.writeUint8)(e,i.open?1:0),(0,m.writeUint8)(e,28),(0,m.writeUint16)(e,1),$l(e,i.iconLocation),$l(e,i.popupLocation),(0,m.writeColor)(e,i.color),(0,m.writePascalString)(e,i.author||"",2),(0,m.writePascalString)(e,i.name||"",2),(0,m.writePascalString)(e,i.date||"",2);let s=e.offset;(0,m.writeUint32)(e,0),(0,m.writeSignature)(e,o?"sndM":"txtC"),(0,m.writeUint32)(e,0);let a=e.offset;if(o)(0,m.writeBytes)(e,i.data);else{(0,m.writeUint16)(e,65279);let l=i.data.replace(/\\n/g,"\\r");for(let c=0;c<l.length;c++)(0,m.writeUint16)(e,l.charCodeAt(c))}e.view.setUint32(r,e.offset-r,!1),e.view.setUint32(s,e.offset-s,!1),e.view.setUint32(a-4,e.offset-a,!1)}});function ec(e){P(e,n=>{let t=n;return!(!t.linkedFiles||!t.linkedFiles.length||e==="lnkE"&&!t.linkedFiles.some(i=>i.linkedFile))},(n,t,i,o)=>{let r=t;for(r.linkedFiles=r.linkedFiles||[];i()>8;){let s=mr(n),a=n.offset,l=(0,g.readSignature)(n),c=(0,g.readInt32)(n),d=(0,g.readPascalString)(n,1),h=(0,g.readUnicodeString)(n),f=(0,g.readSignature)(n).trim(),u=(0,g.readSignature)(n).trim(),p=mr(n),b=(0,g.readUint8)(n)?(0,w.readVersionAndDescriptor)(n):void 0,y=l==="liFE"?(0,w.readVersionAndDescriptor)(n):void 0,S={id:d,name:h};if(f&&(S.type=f),u&&(S.creator=u),b&&(S.descriptor={compInfo:{compID:b.compInfo.compID,originalCompID:b.compInfo.originalCompID}}),l==="liFE"&&c>3){let v=(0,g.readInt32)(n),F=(0,g.readUint8)(n),C=(0,g.readUint8)(n),I=(0,g.readUint8)(n),E=(0,g.readUint8)(n),L=(0,g.readFloat64)(n),M=Math.floor(L),j=(L-M)*1e3;S.time=new Date(Date.UTC(v,F,C,I,E,M,j)).toISOString()}let x=l==="liFE"?mr(n):0;for(l==="liFA"&&(0,g.skipBytes)(n,8),l==="liFD"&&(S.data=(0,g.readBytes)(n,p)),c>=5&&(S.childDocumentID=(0,g.readUnicodeString)(n)),c>=6&&(S.assetModTime=(0,g.readFloat64)(n)),c>=7&&(S.assetLockedState=(0,g.readUint8)(n)),l==="liFE"&&c===2&&(S.data=(0,g.readBytes)(n,x)),n.skipLinkedFilesData&&(S.data=void 0),e==="lnkE"&&(S.linkedFile={fileSize:x,name:(y==null?void 0:y["Nm  "])||"",fullPath:(y==null?void 0:y.fullPath)||"",originalPath:(y==null?void 0:y.originalPath)||"",relativePath:(y==null?void 0:y.relPath)||""}),r.linkedFiles.push(S);s%4;)s++;n.offset=a+s}(0,g.skipBytes)(n,i())},(n,t)=>{var i,o,r,s,a,l,c,d,h;let f=t;for(let u of f.linkedFiles){if(e==="lnkE"!=!!u.linkedFile)continue;let p=2;u.assetLockedState!=null?p=7:u.assetModTime!=null?p=6:u.childDocumentID!=null?p=5:e==="lnkE"&&(p=3),br(n,0);let _=n.offset;if((0,m.writeSignature)(n,e==="lnkE"?"liFE":u.data?"liFD":"liFA"),(0,m.writeInt32)(n,p),!u.id||typeof u.id!="string"||!/^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(u.id))throw new Error("Linked file ID must be in a GUID format (example: 20953ddb-9391-11ec-b4f1-c15674f50bc4)");if((0,m.writePascalString)(n,u.id,1),(0,m.writeUnicodeStringWithPadding)(n,u.name||""),(0,m.writeSignature)(n,u.type?`${u.type}    `.substring(0,4):"    "),(0,m.writeSignature)(n,u.creator?`${u.creator}    `.substring(0,4):"\\0\\0\\0\\0"),br(n,u.data?u.data.byteLength:0),u.descriptor&&u.descriptor.compInfo){let y={compInfo:{compID:u.descriptor.compInfo.compID,originalCompID:u.descriptor.compInfo.originalCompID}};(0,m.writeUint8)(n,1),(0,w.writeVersionAndDescriptor)(n,"","null",y)}else(0,m.writeUint8)(n,0);if(e==="lnkE"){let y={descVersion:2,"Nm  ":(o=(i=u.linkedFile)===null||i===void 0?void 0:i.name)!==null&&o!==void 0?o:"",fullPath:(s=(r=u.linkedFile)===null||r===void 0?void 0:r.fullPath)!==null&&s!==void 0?s:"",originalPath:(l=(a=u.linkedFile)===null||a===void 0?void 0:a.originalPath)!==null&&l!==void 0?l:"",relPath:(d=(c=u.linkedFile)===null||c===void 0?void 0:c.relativePath)!==null&&d!==void 0?d:""};(0,w.writeVersionAndDescriptor)(n,"","ExternalFileLink",y);let S=u.time?new Date(u.time):new Date;(0,m.writeInt32)(n,S.getUTCFullYear()),(0,m.writeUint8)(n,S.getUTCMonth()),(0,m.writeUint8)(n,S.getUTCDate()),(0,m.writeUint8)(n,S.getUTCHours()),(0,m.writeUint8)(n,S.getUTCMinutes()),(0,m.writeFloat64)(n,S.getUTCSeconds()+S.getUTCMilliseconds()/1e3)}u.data?(0,m.writeBytes)(n,u.data):br(n,((h=u.linkedFile)===null||h===void 0?void 0:h.fileSize)||0),p>=5&&(0,m.writeUnicodeStringWithPadding)(n,u.childDocumentID||""),p>=6&&(0,m.writeFloat64)(n,u.assetModTime||0),p>=7&&(0,m.writeUint8)(n,u.assetLockedState||0);let b=n.offset-_;for(n.view.setUint32(_-4,b,!1);b%4;)b++,(0,m.writeUint8)(n,0)}})}ec("lnk2");ec("lnkE");Tt("lnkD","lnk2");Tt("lnk3","lnk2");P("pths",re("pathList"),(e,n)=>{let t=(0,w.readVersionAndDescriptor)(e,!0);n.pathList=[]},(e,n)=>{let t={pathList:[]};(0,w.writeVersionAndDescriptor)(e,"","pathsDataClass",t)});P("lyvr",re("version"),(e,n)=>n.version=(0,g.readUint32)(e),(e,n)=>(0,m.writeUint32)(e,n.version));P("lfxs",()=>!1,(e,n,t)=>{if((0,g.readUint32)(e)!==0)throw new Error("Invalid lfxs version");let o=(0,w.readVersionAndDescriptor)(e);n.effects=(0,w.parseEffects)(o,!!e.logMissingFeatures),(0,g.skipBytes)(e,t())},(e,n,t,i)=>{let o=(0,w.serializeEffects)(n.effects,!!i.logMissingFeatures,!0);(0,m.writeUint32)(e,0),(0,w.writeVersionAndDescriptor)(e,"","null",o)});function Ce(e){return n=>!!n.adjustment&&n.adjustment.type===e}P("brit",Ce("brightness/contrast"),(e,n,t)=>{n.adjustment||(n.adjustment={type:"brightness/contrast",brightness:(0,g.readInt16)(e),contrast:(0,g.readInt16)(e),meanValue:(0,g.readInt16)(e),labColorOnly:!!(0,g.readUint8)(e),useLegacy:!0}),(0,g.skipBytes)(e,t())},(e,n)=>{var t;let i=n.adjustment;(0,m.writeInt16)(e,i.brightness||0),(0,m.writeInt16)(e,i.contrast||0),(0,m.writeInt16)(e,(t=i.meanValue)!==null&&t!==void 0?t:127),(0,m.writeUint8)(e,i.labColorOnly?1:0),(0,m.writeZeros)(e,1)});function Wi(e){let n=(0,g.readInt16)(e),t=(0,g.readInt16)(e),i=(0,g.readInt16)(e),o=(0,g.readInt16)(e),r=(0,g.readInt16)(e)/100;return{shadowInput:n,highlightInput:t,shadowOutput:i,highlightOutput:o,midtoneInput:r}}function Xn(e,n){(0,m.writeInt16)(e,n.shadowInput),(0,m.writeInt16)(e,n.highlightInput),(0,m.writeInt16)(e,n.shadowOutput),(0,m.writeInt16)(e,n.highlightOutput),(0,m.writeInt16)(e,Math.round(n.midtoneInput*100))}P("levl",Ce("levels"),(e,n,t)=>{if((0,g.readUint16)(e)!==2)throw new Error("Invalid levl version");n.adjustment=Object.assign(Object.assign({},n.adjustment),{type:"levels",rgb:Wi(e),red:Wi(e),green:Wi(e),blue:Wi(e)}),(0,g.skipBytes)(e,t())},(e,n)=>{let t=n.adjustment,i={shadowInput:0,highlightInput:255,shadowOutput:0,highlightOutput:255,midtoneInput:1};(0,m.writeUint16)(e,2),Xn(e,t.rgb||i),Xn(e,t.red||i),Xn(e,t.green||i),Xn(e,t.blue||i);for(let o=0;o<59;o++)Xn(e,i)});function $i(e){let n=(0,g.readUint16)(e),t=[];for(let i=0;i<n;i++){let o=(0,g.readInt16)(e),r=(0,g.readInt16)(e);t.push({input:r,output:o})}return t}function Mt(e,n){(0,m.writeUint16)(e,n.length);for(let t of n)(0,m.writeUint16)(e,t.output),(0,m.writeUint16)(e,t.input)}P("curv",Ce("curves"),(e,n,t)=>{if((0,g.readUint8)(e),(0,g.readUint16)(e)!==1)throw new Error("Invalid curv version");(0,g.readUint16)(e);let i=(0,g.readUint16)(e),o={type:"curves"};i&1&&(o.rgb=$i(e)),i&2&&(o.red=$i(e)),i&4&&(o.green=$i(e)),i&8&&(o.blue=$i(e)),n.adjustment=Object.assign(Object.assign({},n.adjustment),o),(0,g.skipBytes)(e,t())},(e,n)=>{let t=n.adjustment,{rgb:i,red:o,green:r,blue:s}=t,a=0,l=0;i&&i.length&&(a|=1,l++),o&&o.length&&(a|=2,l++),r&&r.length&&(a|=4,l++),s&&s.length&&(a|=8,l++),(0,m.writeUint8)(e,0),(0,m.writeUint16)(e,1),(0,m.writeUint16)(e,0),(0,m.writeUint16)(e,a),i&&i.length&&Mt(e,i),o&&o.length&&Mt(e,o),r&&r.length&&Mt(e,r),s&&s.length&&Mt(e,s),(0,m.writeSignature)(e,"Crv "),(0,m.writeUint16)(e,4),(0,m.writeUint16)(e,0),(0,m.writeUint16)(e,l),i&&i.length&&((0,m.writeUint16)(e,0),Mt(e,i)),o&&o.length&&((0,m.writeUint16)(e,1),Mt(e,o)),r&&r.length&&((0,m.writeUint16)(e,2),Mt(e,r)),s&&s.length&&((0,m.writeUint16)(e,3),Mt(e,s))});P("expA",Ce("exposure"),(e,n,t)=>{if((0,g.readUint16)(e)!==1)throw new Error("Invalid expA version");n.adjustment=Object.assign(Object.assign({},n.adjustment),{type:"exposure",exposure:(0,g.readFloat32)(e),offset:(0,g.readFloat32)(e),gamma:(0,g.readFloat32)(e)}),(0,g.skipBytes)(e,t())},(e,n)=>{let t=n.adjustment;(0,m.writeUint16)(e,1),(0,m.writeFloat32)(e,t.exposure),(0,m.writeFloat32)(e,t.offset),(0,m.writeFloat32)(e,t.gamma),(0,m.writeZeros)(e,2)});P("vibA",Ce("vibrance"),(e,n,t)=>{let i=(0,w.readVersionAndDescriptor)(e);n.adjustment={type:"vibrance"},i.vibrance!==void 0&&(n.adjustment.vibrance=i.vibrance),i.Strt!==void 0&&(n.adjustment.saturation=i.Strt),(0,g.skipBytes)(e,t())},(e,n)=>{let t=n.adjustment,i={};t.vibrance!==void 0&&(i.vibrance=t.vibrance),t.saturation!==void 0&&(i.Strt=t.saturation),(0,w.writeVersionAndDescriptor)(e,"","null",i)});function qt(e){return{a:(0,g.readInt16)(e),b:(0,g.readInt16)(e),c:(0,g.readInt16)(e),d:(0,g.readInt16)(e),hue:(0,g.readInt16)(e),saturation:(0,g.readInt16)(e),lightness:(0,g.readInt16)(e)}}function Kt(e,n){let t=n||{};(0,m.writeInt16)(e,t.a||0),(0,m.writeInt16)(e,t.b||0),(0,m.writeInt16)(e,t.c||0),(0,m.writeInt16)(e,t.d||0),(0,m.writeInt16)(e,t.hue||0),(0,m.writeInt16)(e,t.saturation||0),(0,m.writeInt16)(e,t.lightness||0)}P("hue2",Ce("hue/saturation"),(e,n,t)=>{if((0,g.readUint16)(e)!==2)throw new Error("Invalid hue2 version");n.adjustment=Object.assign(Object.assign({},n.adjustment),{type:"hue/saturation",master:qt(e),reds:qt(e),yellows:qt(e),greens:qt(e),cyans:qt(e),blues:qt(e),magentas:qt(e)}),(0,g.skipBytes)(e,t())},(e,n)=>{let t=n.adjustment;(0,m.writeUint16)(e,2),Kt(e,t.master),Kt(e,t.reds),Kt(e,t.yellows),Kt(e,t.greens),Kt(e,t.cyans),Kt(e,t.blues),Kt(e,t.magentas)});function wr(e){return{cyanRed:(0,g.readInt16)(e),magentaGreen:(0,g.readInt16)(e),yellowBlue:(0,g.readInt16)(e)}}function Sr(e,n){(0,m.writeInt16)(e,n.cyanRed||0),(0,m.writeInt16)(e,n.magentaGreen||0),(0,m.writeInt16)(e,n.yellowBlue||0)}P("blnc",Ce("color balance"),(e,n,t)=>{n.adjustment={type:"color balance",shadows:wr(e),midtones:wr(e),highlights:wr(e),preserveLuminosity:!!(0,g.readUint8)(e)},(0,g.skipBytes)(e,t())},(e,n)=>{let t=n.adjustment;Sr(e,t.shadows||{}),Sr(e,t.midtones||{}),Sr(e,t.highlights||{}),(0,m.writeUint8)(e,t.preserveLuminosity?1:0),(0,m.writeZeros)(e,1)});P("blwh",Ce("black & white"),(e,n,t)=>{let i=(0,w.readVersionAndDescriptor)(e);n.adjustment={type:"black & white",reds:i["Rd  "],yellows:i.Yllw,greens:i["Grn "],cyans:i["Cyn "],blues:i["Bl  "],magentas:i.Mgnt,useTint:!!i.useTint,presetKind:i.bwPresetKind,presetFileName:i.blackAndWhitePresetFileName},i.tintColor!==void 0&&(n.adjustment.tintColor=(0,w.parseColor)(i.tintColor)),(0,g.skipBytes)(e,t())},(e,n)=>{let t=n.adjustment,i={"Rd  ":t.reds||0,Yllw:t.yellows||0,"Grn ":t.greens||0,"Cyn ":t.cyans||0,"Bl  ":t.blues||0,Mgnt:t.magentas||0,useTint:!!t.useTint,tintColor:(0,w.serializeColor)(t.tintColor),bwPresetKind:t.presetKind||0,blackAndWhitePresetFileName:t.presetFileName||""};(0,w.writeVersionAndDescriptor)(e,"","null",i)});P("phfl",Ce("photo filter"),(e,n,t)=>{let i=(0,g.readUint16)(e);if(i!==2&&i!==3)throw new Error("Invalid phfl version");let o;i===2?o=(0,g.readColor)(e):o={l:(0,g.readInt32)(e)/100,a:(0,g.readInt32)(e)/100,b:(0,g.readInt32)(e)/100},n.adjustment={type:"photo filter",color:o,density:(0,g.readUint32)(e)/100,preserveLuminosity:!!(0,g.readUint8)(e)},(0,g.skipBytes)(e,t())},(e,n)=>{let t=n.adjustment;(0,m.writeUint16)(e,2),(0,m.writeColor)(e,t.color||{l:0,a:0,b:0}),(0,m.writeUint32)(e,(t.density||0)*100),(0,m.writeUint8)(e,t.preserveLuminosity?1:0),(0,m.writeZeros)(e,3)});function Zi(e){let n=(0,g.readInt16)(e),t=(0,g.readInt16)(e),i=(0,g.readInt16)(e);(0,g.skipBytes)(e,2);let o=(0,g.readInt16)(e);return{red:n,green:t,blue:i,constant:o}}function qn(e,n){let t=n||{};(0,m.writeInt16)(e,t.red),(0,m.writeInt16)(e,t.green),(0,m.writeInt16)(e,t.blue),(0,m.writeZeros)(e,2),(0,m.writeInt16)(e,t.constant)}P("mixr",Ce("channel mixer"),(e,n,t)=>{if((0,g.readUint16)(e)!==1)throw new Error("Invalid mixr version");let i=n.adjustment=Object.assign(Object.assign({},n.adjustment),{type:"channel mixer",monochrome:!!(0,g.readUint16)(e)});i.monochrome||(i.red=Zi(e),i.green=Zi(e),i.blue=Zi(e)),i.gray=Zi(e),(0,g.skipBytes)(e,t())},(e,n)=>{let t=n.adjustment;(0,m.writeUint16)(e,1),(0,m.writeUint16)(e,t.monochrome?1:0),t.monochrome?(qn(e,t.gray),(0,m.writeZeros)(e,30)):(qn(e,t.red),qn(e,t.green),qn(e,t.blue),qn(e,t.gray))});var Zl=(0,Ge.createEnum)("colorLookupType","3dlut",{"3dlut":"3DLUT",abstractProfile:"abstractProfile",deviceLinkProfile:"deviceLinkProfile"}),Xl=(0,Ge.createEnum)("LUTFormatType","look",{look:"LUTFormatLOOK",cube:"LUTFormatCUBE","3dl":"LUTFormat3DL"}),Xi=(0,Ge.createEnum)("colorLookupOrder","rgb",{rgb:"rgbOrder",bgr:"bgrOrder"});P("clrL",Ce("color lookup"),(e,n,t)=>{if((0,g.readUint16)(e)!==1)throw new Error("Invalid clrL version");let i=(0,w.readVersionAndDescriptor)(e);n.adjustment={type:"color lookup"};let o=n.adjustment;i.lookupType!==void 0&&(o.lookupType=Zl.decode(i.lookupType)),i["Nm  "]!==void 0&&(o.name=i["Nm  "]),i.Dthr!==void 0&&(o.dither=i.Dthr),i.profile!==void 0&&(o.profile=i.profile),i.LUTFormat!==void 0&&(o.lutFormat=Xl.decode(i.LUTFormat)),i.dataOrder!==void 0&&(o.dataOrder=Xi.decode(i.dataOrder)),i.tableOrder!==void 0&&(o.tableOrder=Xi.decode(i.tableOrder)),i.LUT3DFileData!==void 0&&(o.lut3DFileData=i.LUT3DFileData),i.LUT3DFileName!==void 0&&(o.lut3DFileName=i.LUT3DFileName),(0,g.skipBytes)(e,t())},(e,n)=>{let t=n.adjustment,i={};t.lookupType!==void 0&&(i.lookupType=Zl.encode(t.lookupType)),t.name!==void 0&&(i["Nm  "]=t.name),t.dither!==void 0&&(i.Dthr=t.dither),t.profile!==void 0&&(i.profile=t.profile),t.lutFormat!==void 0&&(i.LUTFormat=Xl.encode(t.lutFormat)),t.dataOrder!==void 0&&(i.dataOrder=Xi.encode(t.dataOrder)),t.tableOrder!==void 0&&(i.tableOrder=Xi.encode(t.tableOrder)),t.lut3DFileData!==void 0&&(i.LUT3DFileData=t.lut3DFileData),t.lut3DFileName!==void 0&&(i.LUT3DFileName=t.lut3DFileName),(0,m.writeUint16)(e,1),(0,w.writeVersionAndDescriptor)(e,"","null",i)});P("nvrt",Ce("invert"),(e,n,t)=>{n.adjustment={type:"invert"},(0,g.skipBytes)(e,t())},()=>{});P("post",Ce("posterize"),(e,n,t)=>{n.adjustment={type:"posterize",levels:(0,g.readUint16)(e)},(0,g.skipBytes)(e,t())},(e,n)=>{var t;let i=n.adjustment;(0,m.writeUint16)(e,(t=i.levels)!==null&&t!==void 0?t:4),(0,m.writeZeros)(e,2)});P("thrs",Ce("threshold"),(e,n,t)=>{n.adjustment={type:"threshold",level:(0,g.readUint16)(e)},(0,g.skipBytes)(e,t())},(e,n)=>{var t;let i=n.adjustment;(0,m.writeUint16)(e,(t=i.level)!==null&&t!==void 0?t:128),(0,m.writeZeros)(e,2)});var ql=["","","","rgb","hsb","","lab"];P("grdm",Ce("gradient map"),(e,n,t)=>{let i=(0,g.readUint16)(e);if(i!==1&&i!==3)throw new Error("Invalid grdm version");let o={type:"gradient map",gradientType:"solid"};o.reverse=!!(0,g.readUint8)(e),o.dither=!!(0,g.readUint8)(e);let r=!!(0,g.readUint8)(e);if(e.offset--,r){let h=(0,g.readSignature)(e);o.method=w.gradientInterpolationMethodType.decode(h)}o.name=(0,g.readUnicodeString)(e),o.colorStops=[],o.opacityStops=[];let s=(0,g.readUint16)(e);for(let h=0;h<s;h++)o.colorStops.push({location:(0,g.readUint32)(e),midpoint:(0,g.readUint32)(e)/100,color:(0,g.readColor)(e)}),(0,g.skipBytes)(e,2);let a=(0,g.readUint16)(e);for(let h=0;h<a;h++)o.opacityStops.push({location:(0,g.readUint32)(e),midpoint:(0,g.readUint32)(e)/100,opacity:(0,g.readUint16)(e)/255});if((0,g.readUint16)(e)!==2)throw new Error("Invalid grdm expansion count");let c=(0,g.readUint16)(e);if(o.smoothness=c/4096,(0,g.readUint16)(e)!==32)throw new Error("Invalid grdm length");o.gradientType=(0,g.readUint16)(e)?"noise":"solid",o.randomSeed=(0,g.readUint32)(e),o.addTransparency=!!(0,g.readUint16)(e),o.restrictColors=!!(0,g.readUint16)(e),o.roughness=(0,g.readUint32)(e)/4096,o.colorModel=ql[(0,g.readUint16)(e)]||"rgb",o.min=[(0,g.readUint16)(e)/32768,(0,g.readUint16)(e)/32768,(0,g.readUint16)(e)/32768,(0,g.readUint16)(e)/32768],o.max=[(0,g.readUint16)(e)/32768,(0,g.readUint16)(e)/32768,(0,g.readUint16)(e)/32768,(0,g.readUint16)(e)/32768],(0,g.skipBytes)(e,t());for(let h of o.colorStops)h.location/=c;for(let h of o.opacityStops)h.location/=c;n.adjustment=o},(e,n)=>{var t,i,o;let r=n.adjustment;(0,m.writeUint16)(e,r.method!==void 0?3:1),(0,m.writeUint8)(e,r.reverse?1:0),(0,m.writeUint8)(e,r.dither?1:0),r.method!==void 0&&(0,m.writeSignature)(e,w.gradientInterpolationMethodType.encode(r.method)),(0,m.writeUnicodeStringWithPadding)(e,r.name||""),(0,m.writeUint16)(e,r.colorStops&&r.colorStops.length||0);let s=Math.round(((t=r.smoothness)!==null&&t!==void 0?t:1)*4096);for(let l of r.colorStops||[])(0,m.writeUint32)(e,Math.round(l.location*s)),(0,m.writeUint32)(e,Math.round(l.midpoint*100)),(0,m.writeColor)(e,l.color),(0,m.writeZeros)(e,2);(0,m.writeUint16)(e,r.opacityStops&&r.opacityStops.length||0);for(let l of r.opacityStops||[])(0,m.writeUint32)(e,Math.round(l.location*s)),(0,m.writeUint32)(e,Math.round(l.midpoint*100)),(0,m.writeUint16)(e,Math.round(l.opacity*255));(0,m.writeUint16)(e,2),(0,m.writeUint16)(e,s),(0,m.writeUint16)(e,32),(0,m.writeUint16)(e,r.gradientType==="noise"?1:0),(0,m.writeUint32)(e,r.randomSeed||0),(0,m.writeUint16)(e,r.addTransparency?1:0),(0,m.writeUint16)(e,r.restrictColors?1:0),(0,m.writeUint32)(e,Math.round(((i=r.roughness)!==null&&i!==void 0?i:1)*4096));let a=ql.indexOf((o=r.colorModel)!==null&&o!==void 0?o:"rgb");(0,m.writeUint16)(e,a===-1?3:a);for(let l=0;l<4;l++)(0,m.writeUint16)(e,Math.round((r.min&&r.min[l]||0)*32768));for(let l=0;l<4;l++)(0,m.writeUint16)(e,Math.round((r.max&&r.max[l]||0)*32768));(0,m.writeZeros)(e,4)});function St(e){return{c:(0,g.readInt16)(e),m:(0,g.readInt16)(e),y:(0,g.readInt16)(e),k:(0,g.readInt16)(e)}}function _t(e,n){let t=n||{};(0,m.writeInt16)(e,t.c),(0,m.writeInt16)(e,t.m),(0,m.writeInt16)(e,t.y),(0,m.writeInt16)(e,t.k)}P("selc",Ce("selective color"),(e,n)=>{if((0,g.readUint16)(e)!==1)throw new Error("Invalid selc version");let t=(0,g.readUint16)(e)?"absolute":"relative";(0,g.skipBytes)(e,8),n.adjustment={type:"selective color",mode:t,reds:St(e),yellows:St(e),greens:St(e),cyans:St(e),blues:St(e),magentas:St(e),whites:St(e),neutrals:St(e),blacks:St(e)}},(e,n)=>{let t=n.adjustment;(0,m.writeUint16)(e,1),(0,m.writeUint16)(e,t.mode==="absolute"?1:0),(0,m.writeZeros)(e,8),_t(e,t.reds),_t(e,t.yellows),_t(e,t.greens),_t(e,t.cyans),_t(e,t.blues),_t(e,t.magentas),_t(e,t.whites),_t(e,t.neutrals),_t(e,t.blacks)});P("CgEd",e=>{let n=e.adjustment;return n?n.type==="brightness/contrast"&&!n.useLegacy||(n.type==="levels"||n.type==="curves"||n.type==="exposure"||n.type==="channel mixer"||n.type==="hue/saturation")&&n.presetFileName!==void 0:!1},(e,n,t)=>{let i=(0,w.readVersionAndDescriptor)(e);if(i.Vrsn!==1)throw new Error("Invalid CgEd version");"presetFileName"in i?n.adjustment=Object.assign(Object.assign({},n.adjustment),{presetKind:i.presetKind,presetFileName:i.presetFileName}):"curvesPresetFileName"in i?n.adjustment=Object.assign(Object.assign({},n.adjustment),{presetKind:i.curvesPresetKind,presetFileName:i.curvesPresetFileName}):"mixerPresetFileName"in i?n.adjustment=Object.assign(Object.assign({},n.adjustment),{presetKind:i.mixerPresetKind,presetFileName:i.mixerPresetFileName}):n.adjustment={type:"brightness/contrast",brightness:i.Brgh,contrast:i.Cntr,meanValue:i.means,useLegacy:!!i.useLegacy,labColorOnly:!!i["Lab "],auto:!!i.Auto},(0,g.skipBytes)(e,t())},(e,n)=>{var t,i,o,r;let s=n.adjustment;if(s.type==="levels"||s.type==="exposure"||s.type==="hue/saturation"){let a={Vrsn:1,presetKind:(t=s.presetKind)!==null&&t!==void 0?t:1,presetFileName:s.presetFileName||""};(0,w.writeVersionAndDescriptor)(e,"","null",a)}else if(s.type==="curves"){let a={Vrsn:1,curvesPresetKind:(i=s.presetKind)!==null&&i!==void 0?i:1,curvesPresetFileName:s.presetFileName||""};(0,w.writeVersionAndDescriptor)(e,"","null",a)}else if(s.type==="channel mixer"){let a={Vrsn:1,mixerPresetKind:(o=s.presetKind)!==null&&o!==void 0?o:1,mixerPresetFileName:s.presetFileName||""};(0,w.writeVersionAndDescriptor)(e,"","null",a)}else if(s.type==="brightness/contrast"){let a={Vrsn:1,Brgh:s.brightness||0,Cntr:s.contrast||0,means:(r=s.meanValue)!==null&&r!==void 0?r:127,"Lab ":!!s.labColorOnly,useLegacy:!!s.useLegacy,Auto:!!s.auto};(0,w.writeVersionAndDescriptor)(e,"","null",a)}else throw new Error("Unhandled CgEd case")});function $0(e){let n=[];function t(i){var o;if(i.children)for(let r of i.children)((o=r.text)===null||o===void 0?void 0:o.index)!==void 0&&(n[r.text.index]=r),t(r)}return t(e),n}P("Txt2",re("engineData"),(e,n,t,i)=>{let o=(0,g.readBytes)(e,t());n.engineData=(0,Nl.fromByteArray)(o);let r=$0(i),s=(0,_r.parseEngineData)(o),l=(0,j0.decodeEngineData2)(s).ResourceDict.TextFrameSet;if(l)for(let c=0;c<l.length;c++){let d=r[c];l[c].path&&(d!=null&&d.text)&&(d.text.textPath=l[c].path)}},(e,n)=>{let t=(0,Nl.toByteArray)(n.engineData);(0,m.writeBytes)(e,t)});P("FEid",re("filterEffectsMasks"),(e,n,t)=>{let i=(0,g.readInt32)(e);if(i<1||i>3)throw new Error(`Invalid filterEffects version ${i}`);for(n.filterEffectsMasks=[];t()>8;){if((0,g.readUint32)(e))throw new Error("filterEffects: 64 bit length is not supported");let o=(0,g.readUint32)(e),r=e.offset+o,s=(0,g.readPascalString)(e,1),a=(0,g.readInt32)(e);if(a!==1)throw new Error(`Invalid filterEffect version ${a}`);if((0,g.readUint32)(e))throw new Error("filterEffect: 64 bit length is not supported");(0,g.readUint32)(e);let l=(0,g.readInt32)(e),c=(0,g.readInt32)(e),d=(0,g.readInt32)(e),h=(0,g.readInt32)(e),f=(0,g.readInt32)(e),u=(0,g.readInt32)(e),p=[];for(let b=0;b<u+2;b++)if((0,g.readInt32)(e)){if((0,g.readUint32)(e))throw new Error("filterEffect: 64 bit length is not supported");let S=(0,g.readUint32)(e);if(!S)throw new Error("filterEffect: Empty channel");let x=(0,g.readUint16)(e),v=(0,g.readBytes)(e,S-2);p.push({compressionMode:x,data:v})}else p.push(void 0);if(n.filterEffectsMasks.push({id:s,top:l,left:c,bottom:d,right:h,depth:f,channels:p}),e.offset<r&&(0,g.readUint8)(e)){let b=(0,g.readInt32)(e),y=(0,g.readInt32)(e),S=(0,g.readInt32)(e),x=(0,g.readInt32)(e);if((0,g.readUint32)(e))throw new Error("filterEffect: 64 bit length is not supported");let v=(0,g.readUint32)(e),F=(0,g.readUint16)(e),C=(0,g.readBytes)(e,v-2);n.filterEffectsMasks[n.filterEffectsMasks.length-1].extra={top:b,left:y,bottom:S,right:x,compressionMode:F,data:C}}e.offset=r;let _=o;for(;_%4;)e.offset++,_++}},(e,n)=>{var t;(0,m.writeInt32)(e,3);for(let i of n.filterEffectsMasks){(0,m.writeUint32)(e,0),(0,m.writeUint32)(e,0);let o=e.offset;(0,m.writePascalString)(e,i.id,1),(0,m.writeInt32)(e,1),(0,m.writeUint32)(e,0),(0,m.writeUint32)(e,0);let r=e.offset;(0,m.writeInt32)(e,i.top),(0,m.writeInt32)(e,i.left),(0,m.writeInt32)(e,i.bottom),(0,m.writeInt32)(e,i.right),(0,m.writeInt32)(e,i.depth);let s=Math.max(0,i.channels.length-2);(0,m.writeInt32)(e,s);for(let c=0;c<s+2;c++){let d=i.channels[c];(0,m.writeInt32)(e,d?1:0),d&&((0,m.writeUint32)(e,0),(0,m.writeUint32)(e,d.data.length+2),(0,m.writeUint16)(e,d.compressionMode),(0,m.writeBytes)(e,d.data))}e.view.setUint32(r-4,e.offset-r,!1);let a=(t=n.filterEffectsMasks[n.filterEffectsMasks.length-1])===null||t===void 0?void 0:t.extra;a&&((0,m.writeUint8)(e,1),(0,m.writeInt32)(e,a.top),(0,m.writeInt32)(e,a.left),(0,m.writeInt32)(e,a.bottom),(0,m.writeInt32)(e,a.right),(0,m.writeUint32)(e,0),(0,m.writeUint32)(e,a.data.byteLength+2),(0,m.writeUint16)(e,a.compressionMode),(0,m.writeBytes)(e,a.data));let l=e.offset-o;for(e.view.setUint32(o-4,l,!1);l%4;)(0,m.writeZeros)(e,1),l++}});Tt("FXid","FEid");P("FMsk",re("filterMask"),(e,n)=>{n.filterMask={colorSpace:(0,g.readColor)(e),opacity:(0,g.readUint16)(e)/255}},(e,n)=>{var t;(0,m.writeColor)(e,n.filterMask.colorSpace),(0,m.writeUint16)(e,(0,Ge.clamp)((t=n.filterMask.opacity)!==null&&t!==void 0?t:1,0,1)*255)});P("artd",e=>e.artboards!==void 0,(e,n,t)=>{let i=(0,w.readVersionAndDescriptor)(e);n.artboards={count:i["Cnt "],autoExpandOffset:{horizontal:i.autoExpandOffset.Hrzn,vertical:i.autoExpandOffset.Vrtc},origin:{horizontal:i.origin.Hrzn,vertical:i.origin.Vrtc},autoExpandEnabled:i.autoExpandEnabled,autoNestEnabled:i.autoNestEnabled,autoPositionEnabled:i.autoPositionEnabled,shrinkwrapOnSaveEnabled:!!i.shrinkwrapOnSaveEnabled,docDefaultNewArtboardBackgroundColor:(0,w.parseColor)(i.docDefaultNewArtboardBackgroundColor),docDefaultNewArtboardBackgroundType:i.docDefaultNewArtboardBackgroundType},(0,g.skipBytes)(e,t())},(e,n)=>{var t,i,o,r,s;let a=n.artboards,l={"Cnt ":a.count,autoExpandOffset:a.autoExpandOffset?{Hrzn:a.autoExpandOffset.horizontal,Vrtc:a.autoExpandOffset.vertical}:{Hrzn:0,Vrtc:0},origin:a.origin?{Hrzn:a.origin.horizontal,Vrtc:a.origin.vertical}:{Hrzn:0,Vrtc:0},autoExpandEnabled:(t=a.autoExpandEnabled)!==null&&t!==void 0?t:!0,autoNestEnabled:(i=a.autoNestEnabled)!==null&&i!==void 0?i:!0,autoPositionEnabled:(o=a.autoPositionEnabled)!==null&&o!==void 0?o:!0,shrinkwrapOnSaveEnabled:(r=a.shrinkwrapOnSaveEnabled)!==null&&r!==void 0?r:!0,docDefaultNewArtboardBackgroundColor:(0,w.serializeColor)(a.docDefaultNewArtboardBackgroundColor),docDefaultNewArtboardBackgroundType:(s=a.docDefaultNewArtboardBackgroundType)!==null&&s!==void 0?s:1};(0,w.writeVersionAndDescriptor)(e,"","null",l,"artd")});function vr(e){return Object.keys(e).map(n=>e[n]).some(n=>Array.isArray(n)&&n.length>1)}P("lfx2",e=>e.effects!==void 0&&!vr(e.effects),(e,n,t)=>{if((0,g.readUint32)(e)!==0)throw new Error("Invalid lfx2 version");let o=(0,w.readVersionAndDescriptor)(e);n.effects=(0,w.parseEffects)(o,!!e.logMissingFeatures),(0,g.skipBytes)(e,t())},(e,n,t,i)=>{let o=(0,w.serializeEffects)(n.effects,!!i.logMissingFeatures,!0);(0,m.writeUint32)(e,0),(0,w.writeVersionAndDescriptor)(e,"","null",o)});P("cinf",re("compositorUsed"),(e,n,t)=>{let i=(0,w.readVersionAndDescriptor)(e);function o(r){return r.split(".")[1]}n.compositorUsed={description:i.description,reason:i.reason,engine:o(i.Engn)},i.Vrsn&&(n.compositorUsed.version=i.Vrsn),i.psVersion&&(n.compositorUsed.photoshopVersion=i.psVersion),i.enableCompCore&&(n.compositorUsed.enableCompCore=o(i.enableCompCore)),i.enableCompCoreGPU&&(n.compositorUsed.enableCompCoreGPU=o(i.enableCompCoreGPU)),i.enableCompCoreThreads&&(n.compositorUsed.enableCompCoreThreads=o(i.enableCompCoreThreads)),i.compCoreSupport&&(n.compositorUsed.compCoreSupport=o(i.compCoreSupport)),i.compCoreGPUSupport&&(n.compositorUsed.compCoreGPUSupport=o(i.compCoreGPUSupport)),(0,g.skipBytes)(e,t())},(e,n)=>{let t=n.compositorUsed,i={Vrsn:t.version||{major:1,minor:0,fix:0}};t.photoshopVersion&&(i.psVersion=t.photoshopVersion),i.description=t.description,i.reason=t.reason,i.Engn=`Engn.${t.engine}`,t.enableCompCore&&(i.enableCompCore=`enable.${t.enableCompCore}`),t.enableCompCoreGPU&&(i.enableCompCoreGPU=`enable.${t.enableCompCoreGPU}`),t.enableCompCoreThreads&&(i.enableCompCoreThreads=`enable.${t.enableCompCoreThreads}`),t.compCoreSupport&&(i.compCoreSupport=`reason.${t.compCoreSupport}`),t.compCoreGPUSupport&&(i.compCoreGPUSupport=`reason.${t.compCoreGPUSupport}`),(0,w.writeVersionAndDescriptor)(e,"","null",i)});P("extn",e=>e._extn!==void 0,(e,n)=>{let t=(0,w.readVersionAndDescriptor)(e);Ge.MOCK_HANDLERS&&(n._extn=t)},(e,n)=>{Ge.MOCK_HANDLERS&&(0,w.writeVersionAndDescriptor)(e,"","null",n._extn)});P("iOpa",re("fillOpacity"),(e,n)=>{n.fillOpacity=(0,g.readUint8)(e)/255,(0,g.skipBytes)(e,3)},(e,n)=>{(0,m.writeUint8)(e,n.fillOpacity*255),(0,m.writeZeros)(e,3)});P("brst",re("channelBlendingRestrictions"),(e,n,t)=>{for(n.channelBlendingRestrictions=[];t()>4;)n.channelBlendingRestrictions.push((0,g.readInt32)(e))},(e,n)=>{for(let t of n.channelBlendingRestrictions)(0,m.writeInt32)(e,t)});P("tsly",re("transparencyShapesLayer"),(e,n)=>{n.transparencyShapesLayer=!!(0,g.readUint8)(e),(0,g.skipBytes)(e,3)},(e,n)=>{(0,m.writeUint8)(e,n.transparencyShapesLayer?1:0),(0,m.writeZeros)(e,3)})});var pn=ee(se=>{"use strict";Object.defineProperty(se,"__esModule",{value:!0});se.createWriter=q0;se.getWriterBuffer=K0;se.getWriterBufferNoCopy=Y0;se.writeUint8=ae;se.writeInt16=Bt;se.writeUint16=Z;se.writeUint16LE=oc;se.writeInt32=Ue;se.writeInt32LE=J0;se.writeUint32=le;se.writeFloat32=Q0;se.writeFloat64=Ir;se.writeFixedPoint32=eh;se.writeFixedPointPath32=th;se.writeBytes=Yn;se.writeZeros=Yt;se.writeSignature=Jt;se.writeAsciiString=nh;se.writePascalString=Ji;se.writeUnicodeStringWithoutLength=rc;se.writeUnicodeStringWithoutLengthLE=ih;se.writeUnicodeString=sc;se.writeUnicodeStringWithPadding=oh;se.writeSection=et;se.writePsd=rh;se.writeColor=mh;se.writePattern=bh;var ye=At(),Z0=ji(),X0=Jo();function q0(e=4096){let n=new ArrayBuffer(e),t=new DataView(n);return{buffer:n,view:t,offset:0,tempBuffer:void 0}}function K0(e){return e.buffer.slice(0,e.offset)}function Y0(e){return new Uint8Array(e.buffer,0,e.offset)}function ae(e,n){let t=xt(e,1);e.view.setUint8(t,n)}function Bt(e,n){let t=xt(e,2);e.view.setInt16(t,n,!1)}function Z(e,n){let t=xt(e,2);e.view.setUint16(t,n,!1)}function oc(e,n){let t=xt(e,2);e.view.setUint16(t,n,!0)}function Ue(e,n){let t=xt(e,4);e.view.setInt32(t,n,!1)}function J0(e,n){let t=xt(e,4);e.view.setInt32(t,n,!0)}function le(e,n){let t=xt(e,4);e.view.setUint32(t,n,!1)}function Q0(e,n){let t=xt(e,4);e.view.setFloat32(t,n,!1)}function Ir(e,n){let t=xt(e,8);e.view.setFloat64(t,n,!1)}function eh(e,n){Ue(e,n*65536)}function th(e,n){Ue(e,n*(1<<24))}function Yn(e,n){n&&(fc(e,e.offset+n.length),new Uint8Array(e.buffer).set(n,e.offset),e.offset+=n.length)}function Yt(e,n){for(let t=0;t<n;t++)ae(e,0)}function Jt(e,n){if(n.length!==4)throw new Error(`Invalid signature: \'${n}\'`);for(let t=0;t<4;t++)ae(e,n.charCodeAt(t))}function nh(e,n){for(let t=0;t<n.length;t++)ae(e,n.charCodeAt(t))}function Ji(e,n,t){let i=n.length;if(i>255)throw new Error("String too long");ae(e,i);for(let o=0;o<i;o++){let r=n.charCodeAt(o);ae(e,r<128?r:63)}for(;++i%t;)ae(e,0)}function rc(e,n){for(let t=0;t<n.length;t++)Z(e,n.charCodeAt(t))}function ih(e,n){for(let t=0;t<n.length;t++)oc(e,n.charCodeAt(t))}function sc(e,n){le(e,n.length),rc(e,n)}function oh(e,n){le(e,n.length+1);for(let t=0;t<n.length;t++)Z(e,n.charCodeAt(t));Z(e,0)}function ac(e=[]){let n=0;for(let t of e){let{width:i,height:o}=Kn(t);if(n=Math.max(n,2*o+2*i*o),t.mask){let{width:r,height:s}=Kn(t.mask);n=Math.max(n,2*s+2*r*s)}if(t.realMask){let{width:r,height:s}=Kn(t.realMask);n=Math.max(n,2*s+2*r*s)}t.children&&(n=Math.max(n,ac(t.children)))}return n}function et(e,n,t,i=!1,o=!1){o&&le(e,0);let r=e.offset;le(e,0),t();let s=e.offset-r-4,a=s;for(;a%n;)ae(e,0),a++;i&&(s=a),e.view.setUint32(r,s,!1)}function lc(e){var n;(n=e.children)===null||n===void 0||n.forEach(lc);let t=e.imageData;if(t&&(t.data instanceof Uint32Array||t.data instanceof Uint16Array))throw new Error("imageData has incorrect bitDepth");if("mask"in e&&e.mask){let i=e.mask.imageData;if(i&&(i.data instanceof Uint32Array||i.data instanceof Uint16Array))throw new Error("mask imageData has incorrect bitDepth")}}function rh(e,n,t={}){var i;if(!(+n.width>0&&+n.height>0))throw new Error("Invalid document size");if((n.width>3e4||n.height>3e4)&&!t.psb)throw new Error("Document size is too large (max is 30000x30000, use PSB format instead)");let o=(i=n.bitsPerChannel)!==null&&i!==void 0?i:8;if(o!==8)throw new Error("bitsPerChannel other than 8 are not supported for writing");lc(n);let r=Object.assign({},n.imageResources),s=Object.assign(Object.assign({},t),{layerIds:new Set,layerToId:new Map});s.generateThumbnail&&(r.thumbnail=fh(n));let a=n.imageData;if(!a&&n.canvas&&(a=n.canvas.getContext("2d").getImageData(0,0,n.canvas.width,n.canvas.height)),a&&(n.width!==a.width||n.height!==a.height))throw new Error("Document canvas must have the same size as document");let l=!!a&&(0,ye.hasAlpha)(a),c=Math.max(ac(n.children),8*n.width*n.height+2*n.height);e.tempBuffer=new Uint8Array(c),Jt(e,"8BPS"),Z(e,t.psb?2:1),Yt(e,6),Z(e,l?4:3),le(e,n.height),le(e,n.width),Z(e,o),Z(e,3),et(e,1,()=>{var _,b,y;if(n.palette){for(let S=0;S<256;S++)ae(e,((_=n.palette[S])===null||_===void 0?void 0:_.r)||0);for(let S=0;S<256;S++)ae(e,((b=n.palette[S])===null||b===void 0?void 0:b.g)||0);for(let S=0;S<256;S++)ae(e,((y=n.palette[S])===null||y===void 0?void 0:y.b)||0)}});let d=[];dc(d,n.children),d.length||d.push({}),r.layersGroup=d.map(_=>_.linkGroup||0),r.layerGroupsEnabledId=d.map(_=>_.linkGroupEnabled==!1?0:1),et(e,1,()=>{for(let _ of X0.resourceHandlers){let b=_.has(r),y=b===!1?0:b===!0?1:b;for(let S=0;S<y;S++)Jt(e,"8BIM"),Z(e,_.key),Ji(e,"",2),et(e,2,()=>_.write(e,r,S))}}),et(e,2,()=>{sh(e,d,n,l,s),ch(e,n.globalLayerMaskInfo),cc(e,n,n,s)},void 0,!!s.psb);let h=l?[0,1,2,3]:[0,1,2],f=a?a.width:n.width,u=a?a.height:n.height,p={data:new Uint8Array(f*u*4),width:f,height:u};if(Z(e,1),ye.RAW_IMAGE_DATA&&n.imageDataRaw)console.log("writing raw image data"),Yn(e,n.imageDataRaw);else{if(a&&p.data.set(new Uint8Array(a.data.buffer,a.data.byteOffset,a.data.byteLength)),l){let _=p.width*p.height*4,b=p.data;for(let y=0;y<_;y+=4){let S=b[y+3];if(S!=0&&S!=255){let x=S/255,v=255*(1-x);b[y+0]=b[y+0]*x+v,b[y+1]=b[y+1]*x+v,b[y+2]=b[y+2]*x+v}}}Yn(e,(0,ye.writeDataRLE)(e.tempBuffer,p,h,!!t.psb))}}function sh(e,n,t,i,o){et(e,4,()=>{var r;Bt(e,i?-n.length:n.length);let s=n.map((a,l)=>uh(e.tempBuffer,a,l===0,o));for(let a of s){let{layer:l,top:c,left:d,bottom:h,right:f,channels:u}=a;Ue(e,c),Ue(e,d),Ue(e,h),Ue(e,f),Z(e,u.length);for(let _ of u)Bt(e,_.id),o.psb&&le(e,0),le(e,_.length);Jt(e,"8BIM"),Jt(e,ye.fromBlendMode[l.blendMode]||"norm"),ae(e,Math.round((0,ye.clamp)((r=l.opacity)!==null&&r!==void 0?r:1,0,1)*255)),ae(e,l.clipping?1:0);let p=8;l.transparencyProtected&&(p|=1),l.hidden&&(p|=2),(l.vectorMask||l.sectionDivider&&l.sectionDivider.type!==0||l.adjustment)&&(p|=16),l.effectsOpen&&(p|=32),ae(e,p),ae(e,0),et(e,1,()=>{ah(e,l,a),lh(e,l),Ji(e,(l.name||"").substring(0,255),4),cc(e,l,t,o)})}for(let a of s)for(let l of a.channels)Z(e,l.compression),l.data&&Yn(e,l.data)},!0,o.psb)}function ah(e,{mask:n,realMask:t},i){et(e,1,()=>{if(!n&&!t)return;let o=0,r=0,s=0;n&&(n.userMaskDensity!==void 0&&(o|=1),n.userMaskFeather!==void 0&&(o|=2),n.vectorMaskDensity!==void 0&&(o|=4),n.vectorMaskFeather!==void 0&&(o|=8),n.disabled&&(r|=2),n.positionRelativeToLayer&&(r|=1),n.fromVectorData&&(r|=8),o&&(r|=16));let a=i.mask||{};if(Ue(e,a.top||0),Ue(e,a.left||0),Ue(e,a.bottom||0),Ue(e,a.right||0),ae(e,n&&n.defaultColor||0),ae(e,r),t){t.disabled&&(s|=2),t.positionRelativeToLayer&&(s|=1),t.fromVectorData&&(s|=8);let l=i.realMask||{};ae(e,s),ae(e,t.defaultColor||0),Ue(e,l.top||0),Ue(e,l.left||0),Ue(e,l.bottom||0),Ue(e,l.right||0)}o&&n&&(ae(e,o),n.userMaskDensity!==void 0&&ae(e,Math.round(n.userMaskDensity*255)),n.userMaskFeather!==void 0&&Ir(e,n.userMaskFeather),n.vectorMaskDensity!==void 0&&ae(e,Math.round(n.vectorMaskDensity*255)),n.vectorMaskFeather!==void 0&&Ir(e,n.vectorMaskFeather)),Yt(e,2)})}function Yi(e,n){ae(e,n[0]),ae(e,n[1]),ae(e,n[2]),ae(e,n[3])}function lh(e,n){et(e,1,()=>{let t=n.blendingRanges;if(t){Yi(e,t.compositeGrayBlendSource),Yi(e,t.compositeGraphBlendDestinationRange);for(let i of t.ranges)Yi(e,i.sourceRange),Yi(e,i.destRange)}})}function ch(e,n){et(e,1,()=>{n&&(Z(e,n.overlayColorSpace),Z(e,n.colorSpace1),Z(e,n.colorSpace2),Z(e,n.colorSpace3),Z(e,n.colorSpace4),Z(e,Math.round(n.opacity*255)),ae(e,n.kind),Yt(e,3))})}function cc(e,n,t,i){for(let o of Z0.infoHandlers){let r=o.key;if(!(r==="Txt2"&&i.invalidateTextLayers)&&(r==="vmsk"&&i.psb&&(r="vsms"),o.has(n))){let s=i.psb&&ye.largeAdditionalInfoKeys.indexOf(r)!==-1,a=r!=="Txt2"&&r!=="cinf"&&r!=="extn"&&r!=="CAI "&&r!=="OCIO",l=r==="Txt2"||r==="luni"||r==="vmsk"||r==="artb"||r==="artd"||r==="vogk"||r==="SoLd"||r==="lnk2"||r==="vscg"||r==="vsms"||r==="GdFl"||r==="lmfx"||r==="lrFX"||r==="cinf"||r==="PlLd"||r==="Anno"||r==="CAI "||r==="OCIO"||r==="GenI"||r==="FEid"||r==="curv"||r==="CgEd"||r==="vibA"||r==="blwh"||r==="grdm";Jt(e,s?"8B64":"8BIM"),Jt(e,r),et(e,l?4:2,()=>{o.write(e,n,t,i)},a,s)}}}function dc(e,n){if(n)for(let t of n){if(t.children&&t.canvas)throw new Error("Invalid layer, cannot have both \'canvas\' and \'children\' properties");if(t.children&&t.imageData)throw new Error("Invalid layer, cannot have both \'imageData\' and \'children\' properties");t.children?(e.push({name:"</Layer group>",sectionDivider:{type:3}}),dc(e,t.children),e.push(Object.assign(Object.assign({},t),{blendMode:t.blendMode==="pass through"?"normal":t.blendMode,sectionDivider:{type:t.opened===!1?2:1,key:ye.fromBlendMode[t.blendMode]||"pass",subType:0}}))):e.push(Object.assign({},t))}}function dh(e,n){let t=e.buffer.byteLength;do t*=2;while(n>t);let i=new ArrayBuffer(t),o=new Uint8Array(i),r=new Uint8Array(e.buffer);o.set(r),e.buffer=i,e.view=new DataView(e.buffer)}function fc(e,n){n>e.buffer.byteLength&&dh(e,n)}function xt(e,n){let t=e.offset;return fc(e,e.offset+=n),t}function fh(e){let n=(0,ye.createCanvas)(10,10),t=1;e.width>e.height?(n.width=160,n.height=Math.floor(e.height*(n.width/e.width)),t=n.width/e.width):(n.height=160,n.width=Math.floor(e.width*(n.height/e.height)),t=n.height/e.height);let i=n.getContext("2d");return i.scale(t,t),e.imageData?i.drawImage((0,ye.imageDataToCanvas)(e.imageData),0,0):e.canvas&&i.drawImage(e.canvas,0,0),n}function tc(e,n,t,i,o,r){let s=i.top|0,a=i.left|0,l=i.right|0,c=i.bottom|0,{width:d,height:h}=Kn(i),f=i.imageData;if(!f&&i.canvas&&d&&h&&(f=i.canvas.getContext("2d").getImageData(0,0,d,h)),f&&(f.width!==d||f.height!==h))throw new Error("Invalid imageData dimentions");l=a+d,c=s+h;let u,p;ye.RAW_IMAGE_DATA&&t[r?"realMaskDataRaw":"maskDataRaw"]?(u=t[r?"realMaskDataRaw":"maskDataRaw"],p=t[r?"realMaskDataRawCompression":"maskDataRawCompression"]):f?o.compress?(u=(0,ye.writeDataZipWithoutPrediction)(f,[0]),p=2):(u=(0,ye.writeDataRLE)(e,f,[0],!!o.psb),p=1):(u=new Uint8Array(0),p=1),n.channels.push({id:r?-3:-2,compression:p,data:u,length:2+u.length}),n[r?"realMask":"mask"]={top:s,left:a,right:l,bottom:c}}function kr(e){return e?{top:e.top||0,left:e.left||0,right:e.right||0,bottom:e.bottom||0}:void 0}function uh(e,n,t,i){if(n.rawData)return Object.assign(Object.assign({layer:n,channels:n.rawData.channels.map(r=>{var s,a;return Object.assign(Object.assign({},r),{length:2+((a=(s=r.data)===null||s===void 0?void 0:s.byteLength)!==null&&a!==void 0?a:0)})})},kr(n)),{mask:kr(n.mask),realMask:kr(n.realMask)});let o=ph(e,n,t,i);return n.mask&&tc(e,o,n,n.mask,i,!1),n.realMask&&tc(e,o,n,n.realMask,i,!0),o}function Kn({canvas:e,imageData:n}){var t,i,o,r;let s=(i=(t=n==null?void 0:n.width)!==null&&t!==void 0?t:e==null?void 0:e.width)!==null&&i!==void 0?i:0,a=(r=(o=n==null?void 0:n.height)!==null&&o!==void 0?o:e==null?void 0:e.height)!==null&&r!==void 0?r:0;return{width:s,height:a}}function hh(e,n,t,i,o){if(e.data instanceof Uint32Array||e.data instanceof Uint16Array)throw new Error("imageData has incorrect bit depth");let r=(0,ye.createImageData)(i,o),s=e.data,a=r.data;for(let l=0;l<o;l++)for(let c=0;c<i;c++){let d=(c+n+(l+t)*e.width)*4,h=(c+l*i)*4;a[h]=s[d],a[h+1]=s[d+1],a[h+2]=s[d+2],a[h+3]=s[d+3]}return r}function ph(e,n,t,i){var o;let r=n.top|0,s=n.left|0,a=n.right|0,l=n.bottom|0,c=[{id:-1,compression:0,data:void 0,length:2},{id:0,compression:0,data:void 0,length:2},{id:1,compression:0,data:void 0,length:2},{id:2,compression:0,data:void 0,length:2}],{width:d,height:h}=Kn(n);if(!(n.canvas||n.imageData)||!d||!h)return a=s,l=r,{layer:n,top:r,left:s,right:a,bottom:l,channels:c};a=s+d,l=r+h;let f=n.imageData||n.canvas.getContext("2d").getImageData(0,0,d,h);if(i.trimImageData){let p=gh(f);if(p.left!==0||p.top!==0||p.right!==f.width||p.bottom!==f.height){if(s+=p.left,r+=p.top,a-=f.width-p.right,l-=f.height-p.bottom,d=a-s,h=l-r,!d||!h)return{layer:n,top:r,left:s,right:a,bottom:l,channels:c};f=hh(f,p.left,p.top,d,h)}}let u=[0,1,2];return(!t||i.noBackground||n.mask||(0,ye.hasAlpha)(f)||ye.RAW_IMAGE_DATA&&(!((o=n.imageDataRaw)===null||o===void 0)&&o[-1]))&&u.unshift(-1),c=u.map(p=>{let _=(0,ye.offsetForChannel)(p,!1),b,y;return ye.RAW_IMAGE_DATA&&n.imageDataRaw?(b=n.imageDataRaw[p],y=n.imageDataRawCompression[p]):i.compress?(b=(0,ye.writeDataZipWithoutPrediction)(f,[_]),y=2):(b=(0,ye.writeDataRLE)(e,f,[_],!!i.psb),y=1),{id:p,compression:y,data:b,length:2+b.length}}),{layer:n,top:r,left:s,right:a,bottom:l,channels:c}}function nc({data:e,width:n},t,i,o){let r=(t*n+i)*4+3|0,s=r+(o-i)*4|0;for(let a=r;a<s;a=a+4|0)if(e[a]!==0)return!1;return!0}function ic({data:e,width:n},t,i,o){let r=n*4|0,s=i*r+t*4+3|0;for(let a=i,l=s;a<o;a++,l=l+r|0)if(e[l]!==0)return!1;return!0}function gh(e){let n=0,t=0,i=e.width,o=e.height;for(;n<o&&nc(e,n,t,i);)n++;for(;o>n&&nc(e,o-1,t,i);)o--;for(;t<i&&ic(e,t,n,o);)t++;for(;i>t&&ic(e,i-1,n,o);)i--;return{top:n,left:t,right:i,bottom:o}}function mh(e,n){n?"r"in n?(Z(e,0),Z(e,Math.round(n.r*257)),Z(e,Math.round(n.g*257)),Z(e,Math.round(n.b*257)),Z(e,0)):"fr"in n?(Z(e,0),Z(e,Math.round(n.fr*255*257)),Z(e,Math.round(n.fg*255*257)),Z(e,Math.round(n.fb*255*257)),Z(e,0)):"l"in n?(Z(e,7),Bt(e,Math.round(n.l*1e4)),Bt(e,Math.round(n.a<0?n.a*12800:n.a*12700)),Bt(e,Math.round(n.b<0?n.b*12800:n.b*12700)),Z(e,0)):"h"in n?(Z(e,1),Z(e,Math.round(n.h*65535)),Z(e,Math.round(n.s*65535)),Z(e,Math.round(n.b*65535)),Z(e,0)):"c"in n?(Z(e,2),Z(e,Math.round(n.c*257)),Z(e,Math.round(n.m*257)),Z(e,Math.round(n.y*257)),Z(e,Math.round(n.k*257))):(Z(e,8),Z(e,Math.round(n.k*1e4/255)),Yt(e,6)):(Z(e,0),Yt(e,8))}function bh(e,n){let t=n.bounds.w,i=n.bounds.h,o={width:t,height:i,data:n.data};le(e,0);let r=e.offset;le(e,1),le(e,3),Bt(e,n.x),Bt(e,n.y),sc(e,n.name+"\\0"),Ji(e,n.id,1),le(e,3),le(e,0);let s=e.offset,a=n.bounds.y,l=n.bounds.x,c=a+i,d=l+t;le(e,a),le(e,l),le(e,c),le(e,d),le(e,24);for(let u=0;u<26;u++){let p=u<3?u:u===25?3:-1;if(p<0){le(e,0);continue}let _=new Uint8Array(t*i+2*i+2*t+16),b=(0,ye.writeDataRLE)(_,o,[p],!1);le(e,1),le(e,b.length+4+16+2+1),le(e,8),le(e,a),le(e,l),le(e,c),le(e,d),Z(e,8),ae(e,1),Yn(e,b)}let h=e.offset-s,f=e.offset-r;for(;f%4;)Yt(e,1),f++;e.view.setUint32(s-4,h,!1),e.view.setUint32(r-4,f,!1)}});var pc=ee(Fr=>{"use strict";Object.defineProperty(Fr,"__esModule",{value:!0});Fr.readAbr=xh;var W=Ii(),Se=Et(),yh=["off","fade","pen pressure","pen tilt","stylus wheel","initial direction","direction","initial rotation","rotation"],uc=["round point","round blunt","round curve","round angle","round fan","flat point","flat blunt","flat curve","flat angle","flat fan"],wh=["erodible point","erodible flat","erodible round","erodible square","erodible triangle","custom"],Sh={_:"brush",MixB:"mixer brush",SmTl:"smudge brush"};function Ae(e){return{control:yh[e.bVTy],steps:e.fStp,jitter:(0,W.parsePercent)(e.jitter),minimum:(0,W.parsePercent)(e["Mnm "])}}function hc(e){switch(e._classID){case"computedBrush":return{type:"computed",size:(0,W.parseUnitsToNumber)(e.Dmtr,"Pixels"),angle:(0,W.parseAngle)(e.Angl),roundness:(0,W.parsePercent)(e.Rndn),spacingOn:e.Intr,spacing:(0,W.parsePercent)(e.Spcn),flipX:e.flipX,flipY:e.flipY,hardness:(0,W.parsePercent)(e.Hrdn)};case"sampledBrush":return{type:"sampled",size:(0,W.parseUnitsToNumber)(e.Dmtr,"Pixels"),angle:(0,W.parseAngle)(e.Angl),roundness:(0,W.parsePercent)(e.Rndn),spacingOn:e.Intr,spacing:(0,W.parsePercent)(e.Spcn),flipX:e.flipX,flipY:e.flipY,name:e["Nm  "],sampledData:e.sampledData};case"dBrush":return{type:"dynamic",shape:uc[e["Shp "]],angle:(0,W.parseAngle)(e.Angl),size:(0,W.parseUnitsToNumber)(e.Dmtr,"Pixels"),density:(0,W.parsePercent)(e.Dnst),length:(0,W.parsePercent)(e.Lngt),clumping:(0,W.parsePercent)(e.clumping),thickness:(0,W.parsePercent)(e.thickness),stiffness:(0,W.parsePercent)(e.stiffness),physics:e.physics,spacing:(0,W.parsePercent)(e.Spcn),spacingOn:e.Intr,flipX:e.flipX,flipY:e.flipY};case"dTips":return Object.assign(Object.assign({type:"tips",angle:(0,W.parseAngle)(e.Angl),size:(0,W.parseUnitsToNumber)(e.Dmtr,"Pixels"),shape:uc[e["Shp "]],physics:e.physics,spacing:(0,W.parsePercent)(e.Spcn),spacingOn:e.Intr,flipX:e.flipX,flipY:e.flipY,tipsType:wh[e.dtipsType],tipsLengthRatio:(0,W.parsePercent)(e.dtipsLengthRatio),tipsHardness:(0,W.parsePercent)(e.dtipsHardness)},e.dtipsGridSize&&e.dtipsErodibleTipHeightMap?{tipsGridSize:e.dtipsGridSize,tipsErodibleTipHeightMap:_h(e.dtipsErodibleTipHeightMap)}:{}),{tipsAirbrushCutoffAngle:e.dtipsAirbrushCutoffAngle,tipsAirbrushGranularity:(0,W.parsePercent)(e.dtipsAirbrushGranularity),tipsAirbrushStreakiness:(0,W.parsePercent)(e.dtipsAirbrushStreakiness),tipsAirbrushSplatSize:(0,W.parsePercent)(e.dtipsAirbrushSplatSize),tipsAirbrushSplatCount:e.dtipsAirbrushSplatCount});default:throw new Error(`Unknown brush classId: ${e._classID}`)}}function _h(e){let n=[];for(let t=0;t<e.byteLength;t++)n.push(e[t]);return n}function xh(e,n={}){var t,i,o,r;let s=(0,Se.createReader)(e.buffer,e.byteOffset,e.byteLength),a=(0,Se.readInt16)(s),l=[],c=[],d=[];if(a===1||a===2)throw new Error(`Unsupported ABR version (${a})`);if(a===6||a===7||a===9||a===10){let h=(0,Se.readInt16)(s);if(h!==1&&h!==2)throw new Error("Unsupported ABR minor version");for(;s.offset<s.view.byteLength;){(0,Se.checkSignature)(s,"8BIM");let f=(0,Se.readSignature)(s),u=(0,Se.readUint32)(s),p=s.offset+u;switch(f){case"samp":{for(;s.offset<p;){let _=(0,Se.readUint32)(s);for(;_&3;)_++;let b=s.offset+_,y=(0,Se.readPascalString)(s,1);(0,Se.skipBytes)(s,h===1?10:264);let S=(0,Se.readInt32)(s),x=(0,Se.readInt32)(s),v=(0,Se.readInt32)(s)-S,F=(0,Se.readInt32)(s)-x;if(F<=0||v<=0)throw new Error("Invalid bounds");let C=(0,Se.readInt16)(s),I=(0,Se.readUint8)(s),E=new Uint8Array(F*v);if(C===8)if(I===0)E.set((0,Se.readBytes)(s,E.byteLength));else if(I===1)(0,Se.readDataRLE)(s,{width:F,height:v,data:E},F,v,C,1,[0],!1);else throw new Error("Invalid compression");else if(C===16)if(I===0)for(let L=0;L<E.byteLength;L++)E[L]=(0,Se.readUint16)(s)>>8;else throw I===1?new Error("not implemented (16bit RLE)"):new Error("Invalid compression");else throw new Error("Invalid depth");l.push({id:y,bounds:{x,y:S,w:F,h:v},alpha:E}),s.offset=b}break}case"desc":{let _=(0,W.readVersionAndDescriptor)(s,!0);for(let b of _.Brsh){let y={name:b["Nm  "],shape:hc(b.Brsh),spacing:(0,W.parsePercent)(b.Spcn),wetEdges:b.Wtdg,noise:b.Nose,useBrushSize:b.useBrushSize};b.interpretation!=null&&(y.interpretation=b.interpretation),b.protectTexture!=null&&(y.protectTexture=b.protectTexture),b.useTipDynamics&&(y.shapeDynamics={tiltScale:(0,W.parsePercent)(b.tiltScale),sizeDynamics:Ae(b.szVr),angleDynamics:Ae(b.angleDynamics),roundnessDynamics:Ae(b.roundnessDynamics),flipX:b.flipX,flipY:b.flipY,brushProjection:b.brushProjection,minimumDiameter:(0,W.parsePercent)(b.minimumDiameter),minimumRoundness:(0,W.parsePercent)(b.minimumRoundness)}),b.useScatter&&(y.scatter={count:b["Cnt "],bothAxes:b.bothAxes,countDynamics:Ae(b.countDynamics),scatterDynamics:Ae(b.scatterDynamics)}),b.useTexture&&b.Txtr&&(y.texture={id:b.Txtr.Idnt,name:b.Txtr["Nm  "],blendMode:W.BlnM.decode(b.textureBlendMode),depth:(0,W.parsePercent)(b.textureDepth),depthMinimum:(0,W.parsePercent)(b.minimumDepth),depthDynamics:Ae(b.textureDepthDynamics),scale:(0,W.parsePercent)(b.textureScale),invert:b.InvT,brightness:b.textureBrightness,contrast:b.textureContrast,textureEachTip:!!b.TxtC});let S=b.dualBrush;S&&S.useDualBrush&&(y.dualBrush={flip:S.Flip,shape:hc(S.Brsh),blendMode:W.BlnM.decode(S.BlnM),useScatter:S.useScatter,spacing:(0,W.parsePercent)(S.Spcn),count:S["Cnt "],bothAxes:S.bothAxes,countDynamics:Ae(S.countDynamics),scatterDynamics:Ae(S.scatterDynamics)}),b.useColorDynamics&&(y.colorDynamics={foregroundBackground:Ae(b.clVr),hue:(0,W.parsePercent)(b["H   "]),saturation:(0,W.parsePercent)(b.Strt),brightness:(0,W.parsePercent)(b.Brgh),purity:(0,W.parsePercent)(b.purity),perTip:b.colorDynamicsPerTip}),b.usePaintDynamics&&(y.transfer={flowDynamics:Ae(b.prVr),opacityDynamics:Ae(b.opVr),wetnessDynamics:Ae(b.wtVr),mixDynamics:Ae(b.mxVr)}),b.useBrushPose&&(y.brushPose={overrideAngle:b.overridePoseAngle,overrideTiltX:b.overridePoseTiltX,overrideTiltY:b.overridePoseTiltY,overridePressure:b.overridePosePressure,pressure:(0,W.parsePercent)(b.brushPosePressure),tiltX:b.brushPoseTiltX,tiltY:b.brushPoseTiltY,angle:b.brushPoseAngle});let x=b.toolOptions;x&&(y.toolOptions={type:Sh[x._classID]||"brush",brushPreset:x.brushPreset,flow:(t=x.flow)!==null&&t!==void 0?t:100,smooth:(i=x.Smoo)!==null&&i!==void 0?i:0,mode:W.BlnM.decode(x["Md  "]||"BlnM.Nrml"),opacity:(o=x.Opct)!==null&&o!==void 0?o:100,smoothing:!!x.smoothing,smoothingValue:x.smoothingValue||0,smoothingRadiusMode:!!x.smoothingRadiusMode,smoothingCatchup:!!x.smoothingCatchup,smoothingCatchupAtEnd:!!x.smoothingCatchupAtEnd,smoothingZoomCompensation:!!x.smoothingZoomCompensation,pressureSmoothing:!!x.pressureSmoothing,usePressureOverridesSize:!!x.usePressureOverridesSize,usePressureOverridesOpacity:!!x.usePressureOverridesOpacity,useLegacy:!!x.useLegacy},x.prVr&&(y.toolOptions.flowDynamics=Ae(x.prVr)),x.opVr&&(y.toolOptions.opacityDynamics=Ae(x.opVr)),x.szVr&&(y.toolOptions.sizeDynamics=Ae(x.szVr)),"wetness"in x&&(y.toolOptions.wetness=x.wetness),"dryness"in x&&(y.toolOptions.dryness=x.dryness),"mix"in x&&(y.toolOptions.mix=x.mix),"autoFill"in x&&(y.toolOptions.autoFill=x.autoFill),"autoClean"in x&&(y.toolOptions.autoClean=x.autoClean),"loadSolidColorOnly"in x&&(y.toolOptions.loadSolidColorOnly=x.loadSolidColorOnly),"sampleAllLayers"in x&&(y.toolOptions.sampleAllLayers=x.sampleAllLayers),"SmdF"in x&&(y.toolOptions.smudgeFingerPainting=x.SmdF),"SmdS"in x&&(y.toolOptions.smudgeSampleAllLayers=x.SmdS),"Prs "in x&&(y.toolOptions.strength=x["Prs "])),c.push(y)}break}case"patt":{for(;s.offset<p;)d.push((0,Se.readPattern)(s));s.offset=p;break}case"phry":{let _=(0,W.readVersionAndDescriptor)(s);n.logMissingFeatures&&!((r=_.hierarchy)===null||r===void 0)&&r.length;break}default:throw new Error(`Invalid brush type: ${f}`)}for(;u%4;)s.offset++,u++}}else throw new Error(`Unsupported ABR version (${a})`);return{samples:l,patterns:d,brushes:c}}});var gc=ee(Dr=>{"use strict";Object.defineProperty(Dr,"__esModule",{value:!0});Dr.readCsh=kh;var vh=ji(),Xe=Et();function kh(e){let n=(0,Xe.createReader)(e.buffer,e.byteOffset,e.byteLength),t={shapes:[]};if((0,Xe.checkSignature)(n,"cush"),(0,Xe.readUint32)(n)!==2)throw new Error("Invalid version");let i=(0,Xe.readUint32)(n);for(let o=0;o<i;o++){let r=(0,Xe.readUnicodeString)(n);for(;n.offset%4;)n.offset++;if((0,Xe.readUint32)(n)!==1)throw new Error("Invalid shape version");let s=(0,Xe.readUint32)(n),a=n.offset+s,l=(0,Xe.readPascalString)(n,1),c=(0,Xe.readUint32)(n),d=(0,Xe.readUint32)(n),h=(0,Xe.readUint32)(n),u=(0,Xe.readUint32)(n)-d,p=h-c,_={paths:[]};(0,vh.readVectorMask)(n,_,u,p,a-n.offset),t.shapes.push(Object.assign({name:r,id:l,width:u,height:p},_)),n.offset=a}return t}});var _c=ee(qe=>{"use strict";Object.defineProperty(qe,"__esModule",{value:!0});qe.Compression=qe.ChannelID=qe.LayerCompCapturedInfo=qe.SectionDividerType=qe.ColorMode=void 0;var mc;(function(e){e[e.Bitmap=0]="Bitmap",e[e.Grayscale=1]="Grayscale",e[e.Indexed=2]="Indexed",e[e.RGB=3]="RGB",e[e.CMYK=4]="CMYK",e[e.Multichannel=7]="Multichannel",e[e.Duotone=8]="Duotone",e[e.Lab=9]="Lab"})(mc||(qe.ColorMode=mc={}));var bc;(function(e){e[e.Other=0]="Other",e[e.OpenFolder=1]="OpenFolder",e[e.ClosedFolder=2]="ClosedFolder",e[e.BoundingSectionDivider=3]="BoundingSectionDivider"})(bc||(qe.SectionDividerType=bc={}));var yc;(function(e){e[e.None=0]="None",e[e.Visibility=1]="Visibility",e[e.Position=2]="Position",e[e.Appearance=4]="Appearance"})(yc||(qe.LayerCompCapturedInfo=yc={}));var wc;(function(e){e[e.Color0=0]="Color0",e[e.Color1=1]="Color1",e[e.Color2=2]="Color2",e[e.Color3=3]="Color3",e[e.Transparency=-1]="Transparency",e[e.UserMask=-2]="UserMask",e[e.RealUserMask=-3]="RealUserMask"})(wc||(qe.ChannelID=wc={}));var Sc;(function(e){e[e.RawData=0]="RawData",e[e.RleCompressed=1]="RleCompressed",e[e.ZipWithoutPrediction=2]="ZipWithoutPrediction",e[e.ZipWithPrediction=3]="ZipWithPrediction"})(Sc||(qe.Compression=Sc={}))});var vc=ee(Q=>{"use strict";var Ih=Q&&Q.__createBinding||(Object.create?(function(e,n,t,i){i===void 0&&(i=t);var o=Object.getOwnPropertyDescriptor(n,t);(!o||("get"in o?!n.__esModule:o.writable||o.configurable))&&(o={enumerable:!0,get:function(){return n[t]}}),Object.defineProperty(e,i,o)}):(function(e,n,t,i){i===void 0&&(i=t),e[i]=n[t]})),Or=Q&&Q.__exportStar||function(e,n){for(var t in e)t!=="default"&&!Object.prototype.hasOwnProperty.call(n,t)&&Ih(n,e,t)};Object.defineProperty(Q,"__esModule",{value:!0});Q.getCompositeCanvas=Q.getCompositeImageData=Q.getLayerRealMaskCanvas=Q.getLayerMaskCanvas=Q.getLayerCanvas=Q.getLayerRealMaskImageData=Q.getLayerMaskImageData=Q.getLayerImageData=Q.decodeLayerPixels=Q.byteArrayToBase64=Q.initializeCanvas=void 0;Q.readPsd=Oh;Q.writePsd=Ch;Q.writePsdUint8Array=xc;Q.writePsdBuffer=Ah;var _n=pn(),Ke=Et();Object.defineProperty(Q,"decodeLayerPixels",{enumerable:!0,get:function(){return Ke.decodeLayerPixels}});Object.defineProperty(Q,"getLayerImageData",{enumerable:!0,get:function(){return Ke.getLayerImageData}});Object.defineProperty(Q,"getLayerMaskImageData",{enumerable:!0,get:function(){return Ke.getLayerMaskImageData}});Object.defineProperty(Q,"getLayerRealMaskImageData",{enumerable:!0,get:function(){return Ke.getLayerRealMaskImageData}});Object.defineProperty(Q,"getLayerCanvas",{enumerable:!0,get:function(){return Ke.getLayerCanvas}});Object.defineProperty(Q,"getLayerMaskCanvas",{enumerable:!0,get:function(){return Ke.getLayerMaskCanvas}});Object.defineProperty(Q,"getLayerRealMaskCanvas",{enumerable:!0,get:function(){return Ke.getLayerRealMaskCanvas}});Object.defineProperty(Q,"getCompositeImageData",{enumerable:!0,get:function(){return Ke.getCompositeImageData}});Object.defineProperty(Q,"getCompositeCanvas",{enumerable:!0,get:function(){return Ke.getCompositeCanvas}});var Fh=Si();Or(pc(),Q);Or(gc(),Q);var Dh=At();Object.defineProperty(Q,"initializeCanvas",{enumerable:!0,get:function(){return Dh.initializeCanvas}});Or(_c(),Q);Q.byteArrayToBase64=Fh.fromByteArray;function Oh(e,n){let t="buffer"in e?(0,Ke.createReader)(e.buffer,e.byteOffset,e.byteLength):(0,Ke.createReader)(e);return(0,Ke.readPsd)(t,n)}function Ch(e,n){let t=(0,_n.createWriter)();return(0,_n.writePsd)(t,e,n),(0,_n.getWriterBuffer)(t)}function xc(e,n){let t=(0,_n.createWriter)();return(0,_n.writePsd)(t,e,n),(0,_n.getWriterBufferNoCopy)(t)}function Ah(e,n){if(typeof Buffer=="undefined")throw new Error("Buffer not supported on this platform");return Buffer.from(xc(e,n))}});var Vh={};Vc(Vh,{cancel:()=>Lh,configure:()=>Eh,handleMessage:()=>Nh,isBusy:()=>Ph,reset:()=>Uh});var Pc=Gc(vc());function Fc(e){let n=Math.round(e.x),t=Math.round(e.y);return{left:n,top:t,right:n+Math.round(e.width),bottom:t+Math.round(e.height)}}function Dc(e){return e.right<=e.left||e.bottom<=e.top}function Oc(e,n){return n?{left:Math.max(e.left,n.left),top:Math.max(e.top,n.top),right:Math.min(e.right,n.right),bottom:Math.min(e.bottom,n.bottom)}:e}var kc=1;function Ic(e,n,t){return Math.abs(n-Math.round(e.width))<=kc&&Math.abs(t-Math.round(e.height))<=kc}function Cc(e,n,t,i){return Ic(t,e,n)?{box:t,source:"render"}:Ic(i,e,n)?{box:i,source:"bounds"}:{box:t,source:"fallback"}}function Ac(e,n,t){let i=Math.round(t.x),o=Math.round(t.y);return{left:i,top:o,right:i+e,bottom:o+n}}var Oe=null,Te=null;function Eh(e){Oe=e}function Ph(){return Te!==null}function xn(e,n){Oe&&Oe.onStatus(e,n)}function Jn(e){Oe&&Oe.onBusy(e)}function Uh(){Te=null,Jn(!1)}function Lh(){if(!Te)return;let e=Te.id;Te.cancelled=!0,Te=null,Jn(!1),xn("\\u042D\\u043A\\u0441\\u043F\\u043E\\u0440\\u0442 \\u043E\\u0442\\u043C\\u0435\\u043D\\u0451\\u043D."),Oe&&Oe.postToPlugin({type:"psdExportCancel",sessionId:e})}function Ec(e){if(e instanceof Uint8Array)return e;if(e instanceof ArrayBuffer)return new Uint8Array(e);if(Array.isArray(e))return Uint8Array.from(e);if(e&&typeof e=="object"){let n=e,t=typeof n.length=="number"?n.length:typeof n.byteLength=="number"?n.byteLength:0,i=new Uint8Array(t),o=e;for(let r=0;r<t;r++)i[r]=o[r];return i}return new Uint8Array(0)}function Uc(e,n){for(let t of e)t.kind==="group"?Uc(t.children,n):t.kind==="leaf"&&(n[t.index]={name:t.name,renderBox:t.renderBox,boundsBox:t.boundsBox,clipBox:t.clipBox})}function Pr(e,n){let t=document.createElement("canvas");return t.width=e,t.height=n,t.getContext("2d",{willReadFrequently:!0})}async function Lc(e){let n=new Blob([e],{type:"image/png"});try{return await createImageBitmap(n,{premultiplyAlpha:"none",colorSpaceConversion:"none"})}catch(t){return await createImageBitmap(n)}}function Mh(e,n,t){let i=Pr(n,t);return i?(i.fillStyle=`rgba(${e.r}, ${e.g}, ${e.b}, ${e.opacity})`,i.fillRect(0,0,n,t),i.getImageData(0,0,n,t)):null}async function Th(e,n){let t=await Lc(n);try{let i=Pr(e.docWidth,e.docHeight);if(!i)return;i.drawImage(t,0,0),e.composite=i.getImageData(0,0,e.docWidth,e.docHeight)}finally{t.close()}}async function Bh(e,n,t){let i=e.leaves[n];if(!i)return;let o=await Lc(t);try{let r=Cc(o.width,o.height,i.renderBox,i.boundsBox);r.source==="fallback"&&e.warnings.push(`${i.name}: \\u0441\\u043B\\u043E\\u0439 \\u043E\\u0431\\u0440\\u0435\\u0437\\u0430\\u043D \\u0440\\u043E\\u0434\\u0438\\u0442\\u0435\\u043B\\u0435\\u043C, \\u043F\\u043E\\u0437\\u0438\\u0446\\u0438\\u044F \\u043C\\u043E\\u0436\\u0435\\u0442 \\u0431\\u044B\\u0442\\u044C \\u043D\\u0435\\u0442\\u043E\\u0447\\u043D\\u043E\\u0439`);let s=Ac(o.width,o.height,r.box),a=i.clipBox?Fc(i.clipBox):null,l=Oc(s,a);if(Dc(l))return;let c=l.right-l.left,d=l.bottom-l.top,h=Pr(c,d);if(!h)return;h.drawImage(o,s.left-l.left,s.top-l.top),e.decoded[n]={rect:l,imageData:h.getImageData(0,0,c,d)}}finally{o.close()}}function Mc(e,n){if(e.kind==="group"){let i=[];for(let o of e.children){let r=Mc(o,n);r&&i.push(r)}return i.length===0?null:{name:e.name,opened:!0,children:i}}if(e.kind==="solid"){let i=Mh(e.fill,n.docWidth,n.docHeight);return i?{name:e.name,left:0,top:0,right:n.docWidth,bottom:n.docHeight,imageData:i}:null}let t=n.decoded[e.index];return t?{name:e.name,left:t.rect.left,top:t.rect.top,right:t.rect.right,bottom:t.rect.bottom,imageData:t.imageData,opacity:1,blendMode:"normal",hidden:!1}:null}function Rh(e){let n=e/1024/1024;return n>=1?n.toFixed(1).replace(".",",")+" \\u041C\\u0411":Math.max(1,Math.round(e/1024))+" \\u041A\\u0411"}function Er(e){let n=e%10,t=e%100;return n===1&&t!==11?"\\u0441\\u043B\\u043E\\u0439":n>=2&&n<=4&&(t<12||t>14)?"\\u0441\\u043B\\u043E\\u044F":"\\u0441\\u043B\\u043E\\u0451\\u0432"}function Tc(e){let n=0;for(let t of e)t.children&&t.children.length>0?n+=Tc(t.children):n++;return n}function jh(e,n){let t=new Blob([e],{type:"image/vnd.adobe.photoshop"}),i=URL.createObjectURL(t);try{let o=document.createElement("a");o.href=i,o.download=n,document.body.appendChild(o),o.click(),o.remove()}catch(o){window.open(i,"_blank")}setTimeout(()=>URL.revokeObjectURL(i),1e4)}function zh(e){let n=[];for(let r of e.tree){let s=Mc(r,e);s&&n.push(s)}if(n.length===0){xn("\\u041D\\u0435 \\u0443\\u0434\\u0430\\u043B\\u043E\\u0441\\u044C \\u0441\\u043E\\u0431\\u0440\\u0430\\u0442\\u044C \\u043D\\u0438 \\u043E\\u0434\\u043D\\u043E\\u0433\\u043E \\u0441\\u043B\\u043E\\u044F.",!0),Oe&&Oe.postToPlugin({type:"psdExportNotify",text:"PSD \\u043D\\u0435 \\u0441\\u043E\\u0431\\u0440\\u0430\\u043D: \\u043D\\u0435\\u0442 \\u0441\\u043B\\u043E\\u0451\\u0432",isError:!0});return}let t=(0,Pc.writePsd)({width:e.docWidth,height:e.docHeight,children:n,imageData:e.composite||void 0},{generateThumbnail:!1,trimImageData:!1,psb:e.psb}),i=Tc(n),o=e.fileName+(e.psb?".psb":".psd");jh(t,o),xn(`\\u0413\\u043E\\u0442\\u043E\\u0432\\u043E: ${o}, ${i} ${Er(i)}, ${Rh(t.byteLength)}.`),Oe&&(Oe.onWarnings(e.warnings),Oe.postToPlugin({type:"psdExportNotify",text:`PSD \\u0433\\u043E\\u0442\\u043E\\u0432: ${i} ${Er(i)}`}))}function Cr(e,n){e.chain=e.chain.then(()=>{if(!(e.cancelled||Te!==e))return n()}).catch(t=>{let i=t instanceof Error?t.message:String(t);e.warnings.push(i)})}function Ar(e){return!Te||Te.cancelled?null:Te.id===e.sessionId?Te:null}function Nh(e){if(!e||typeof e!="object")return!1;let n=e;if(n.type==="psdExportStructure"){let t={id:n.sessionId,docWidth:n.docWidth,docHeight:n.docHeight,fileName:n.fileName,psb:n.psb===!0,leafCount:n.leafCount,tree:n.children,leaves:[],decoded:[],composite:null,warnings:(n.warnings||[]).slice(),done:0,chain:Promise.resolve(),cancelled:!1};return Uc(t.tree,t.leaves),Te=t,Jn(!0),Oe&&Oe.onProgress(0,t.leafCount,""),xn(`\\u042D\\u043A\\u0441\\u043F\\u043E\\u0440\\u0442: ${t.docWidth}\\xD7${t.docHeight} px, ${t.leafCount} ${Er(t.leafCount)}\\u2026`),!0}if(n.type==="psdExportComposite"){let t=Ar(n);if(t){let i=Ec(n.bytes);Cr(t,()=>Th(t,i))}return!0}if(n.type==="psdExportLayerBytes"){let t=Ar(n);if(!t)return!0;let i=n.index,r=n.ok===!0?Ec(n.bytes):null;return Cr(t,async()=>{r&&await Bh(t,i,r),t.done++;let s=t.leaves[i];Oe&&(Oe.onProgress(t.done,t.leafCount,s?s.name:""),Oe.postToPlugin({type:"psdExportLayerAck",sessionId:t.id,index:i}))}),!0}if(n.type==="psdExportFinished"){let t=Ar(n);if(!t)return n.ok!==!0&&(xn(String(n.error||"\\u042D\\u043A\\u0441\\u043F\\u043E\\u0440\\u0442 \\u043D\\u0435 \\u0443\\u0434\\u0430\\u043B\\u0441\\u044F."),!0),Jn(!1)),!0;let i=n.warnings||[];return Cr(t,()=>{for(let o of i)t.warnings.indexOf(o)===-1&&t.warnings.push(o);n.ok===!0?zh(t):xn(String(n.error||"\\u042D\\u043A\\u0441\\u043F\\u043E\\u0440\\u0442 \\u043D\\u0435 \\u0443\\u0434\\u0430\\u043B\\u0441\\u044F."),!0),Te===t&&(Te=null),Jn(!1)}),!0}return!1}return Hc(Vh);})();\n</script>\r\n\r\n    <script>\r\n      const tabRaster = document.getElementById("tabRaster");\r\n      const tabMo4 = document.getElementById("tabMo4");\r\n      const tabNames = document.getElementById("tabNames");\r\n      const tabPsd = document.getElementById("tabPsd");\r\n      const panelRaster = document.getElementById("panelRaster");\r\n      const panelMo4 = document.getElementById("panelMo4");\r\n      const panelNames = document.getElementById("panelNames");\r\n      const panelPsd = document.getElementById("panelPsd");\r\n      const rasterStatusEl = document.getElementById("rasterStatus");\r\n      const mo4StatusEl = document.getElementById("mo4Status");\r\n      const namesStatusEl = document.getElementById("namesStatus");\r\n      const psdStatusEl = document.getElementById("psdStatus");\r\n      const psdScaleEl = document.getElementById("psdScale");\r\n      const goPsdEl = document.getElementById("goPsd");\r\n      const psdCancelEl = document.getElementById("psdCancel");\r\n      const psdProgressWrapEl = document.getElementById("psdProgressWrap");\r\n      const psdProgressBarEl = document.getElementById("psdProgressBar");\r\n      const psdWarnWrapEl = document.getElementById("psdWarnWrap");\r\n      const psdWarnBodyEl = document.getElementById("psdWarnBody");\r\n\r\n      // \u0412 .ui-preview.html (\u0441\u0442\u0435\u043D\u0434 \u0432\u0451\u0440\u0441\u0442\u043A\u0438 \u0432\u043D\u0435 Figma) \u0431\u0430\u043D\u0434\u043B\u0430 \u043D\u0435\u0442 \u2014 \u043D\u0435 \u043F\u0430\u0434\u0430\u0435\u043C.\r\n      const psdBridge =\r\n        typeof KGP_PSD !== "undefined"\r\n          ? KGP_PSD\r\n          : {\r\n              configure() {},\r\n              handleMessage() {\r\n                return false;\r\n              },\r\n              cancel() {},\r\n              reset() {},\r\n              isBusy() {\r\n                return false;\r\n              },\r\n            };\r\n      const scaleEl = document.getElementById("scale");\r\n      const originalDispositionEl = document.getElementById("originalDisposition");\r\n      const goRasterEl = document.getElementById("goRaster");\r\n      const mo4CheckEl = document.getElementById("mo4Check");\r\n      const mo4FixEl = document.getElementById("mo4Fix");\r\n      const mo4ListTitleEl = document.getElementById("mo4ListTitle");\r\n      const mo4ListBodyEl = document.getElementById("mo4ListBody");\r\n      const mo4SelectAllEl = document.getElementById("mo4SelectAll");\r\n      const mo4DebugWrapEl = document.getElementById("mo4DebugWrap");\r\n      const mo4DebugTextEl = document.getElementById("mo4DebugText");\r\n      const mo4DebugCopyEl = document.getElementById("mo4DebugCopy");\r\n      let mo4ViolationIds = [];\r\n\r\n      function pluralLayers(n) {\r\n        const mod10 = n % 10;\r\n        const mod100 = n % 100;\r\n        if (mod100 >= 11 && mod100 <= 14) return n + " \u0441\u043B\u043E\u0451\u0432";\r\n        if (mod10 === 1) return n + " \u0441\u043B\u043E\u0439";\r\n        if (mod10 >= 2 && mod10 <= 4) return n + " \u0441\u043B\u043E\u044F";\r\n        return n + " \u0441\u043B\u043E\u0451\u0432";\r\n      }\r\n\r\n      const TABS = [\r\n        { name: "raster", tab: tabRaster, panel: panelRaster, status: rasterStatusEl },\r\n        { name: "mo4", tab: tabMo4, panel: panelMo4, status: mo4StatusEl },\r\n        { name: "names", tab: tabNames, panel: panelNames, status: namesStatusEl },\r\n        { name: "psd", tab: tabPsd, panel: panelPsd, status: psdStatusEl },\r\n      ];\r\n\r\n      function setTab(which) {\r\n        for (const entry of TABS) {\r\n          const active = entry.name === which;\r\n          entry.tab.setAttribute("aria-selected", active ? "true" : "false");\r\n          entry.panel.classList.toggle("is-active", active);\r\n          // \u041F\u0440\u043E\u0433\u0440\u0435\u0441\u0441 \u0438\u0434\u0443\u0449\u0435\u0433\u043E \u044D\u043A\u0441\u043F\u043E\u0440\u0442\u0430 \u043D\u0435 \u0433\u0430\u0441\u0438\u043C: \u043E\u043D \u043F\u0435\u0440\u0435\u0436\u0438\u0432\u0430\u0435\u0442 \u0443\u0445\u043E\u0434 \u043D\u0430 \u0434\u0440\u0443\u0433\u0443\u044E \u0432\u043A\u043B\u0430\u0434\u043A\u0443.\r\n          const keepStatus = entry.name === "psd" && psdBridge.isBusy();\r\n          if (!active && !keepStatus) {\r\n            entry.status.textContent = "";\r\n          }\r\n        }\r\n        if (which === "names") {\r\n          namesSearchEl.focus();\r\n        }\r\n      }\r\n\r\n      for (const entry of TABS) {\r\n        entry.tab.addEventListener("click", () => setTab(entry.name));\r\n      }\r\n\r\n      let originalDisposition = "keep";\r\n      const dispositionRadios = originalDispositionEl.querySelectorAll(\'[role="radio"]\');\r\n      dispositionRadios.forEach((button) => {\r\n        button.addEventListener("click", () => {\r\n          const value = button.getAttribute("data-value");\r\n          if (!value) {\r\n            return;\r\n          }\r\n          originalDisposition = value;\r\n          dispositionRadios.forEach((other) => {\r\n            const selected = other === button;\r\n            other.setAttribute("aria-checked", selected ? "true" : "false");\r\n            other.tabIndex = selected ? 0 : -1;\r\n          });\r\n        });\r\n      });\r\n\r\n      function postToPlugin(message) {\r\n        parent.postMessage({ pluginMessage: message }, "*");\r\n      }\r\n\r\n      const REMOTE_PACKAGE_JSON =\r\n        "https://raw.githubusercontent.com/MaxMaryev/Kids-Games-Figma-Plugin/main/package.json";\r\n\r\n      const updateBannerEl = document.getElementById("updateBanner");\r\n      const updateBannerBodyEl = document.getElementById("updateBannerBody");\r\n      const updateBannerDismissEl = document.getElementById("updateBannerDismiss");\r\n      const pluginVersionFooterEl = document.getElementById("pluginVersionFooter");\r\n\r\n      function setPluginVersionFooterLabel(version) {\r\n        const value = typeof version === "string" && version.length > 0 ? version : "\u2014";\r\n        pluginVersionFooterEl.textContent = "\u0412\u0435\u0440\u0441\u0438\u044F: " + value;\r\n      }\r\n\r\n      let pluginCurrentVersion = "";\r\n      let dismissedRemoteVersion = null;\r\n      let pendingUpdateRemoteVersion = "";\r\n\r\n      function parseSemverCore(version) {\r\n        const match = /^(\\d+)\\.(\\d+)\\.(\\d+)/.exec(String(version).trim());\r\n        if (!match) {\r\n          return null;\r\n        }\r\n        return {\r\n          major: parseInt(match[1], 10),\r\n          minor: parseInt(match[2], 10),\r\n          patch: parseInt(match[3], 10),\r\n        };\r\n      }\r\n\r\n      function isRemoteVersionNewer(currentVersion, remoteVersion) {\r\n        const current = parseSemverCore(currentVersion);\r\n        const remote = parseSemverCore(remoteVersion);\r\n        if (!current || !remote) {\r\n          return false;\r\n        }\r\n        if (remote.major !== current.major) {\r\n          return remote.major > current.major;\r\n        }\r\n        if (remote.minor !== current.minor) {\r\n          return remote.minor > current.minor;\r\n        }\r\n        return remote.patch > current.patch;\r\n      }\r\n\r\n      function isSafeSemverDisplay(value) {\r\n        return /^\\d+\\.\\d+\\.\\d+([+a-zA-Z0-9.-]*)?$/.test(String(value).trim());\r\n      }\r\n\r\n      async function runUpdateCheck() {\r\n        if (!pluginCurrentVersion) {\r\n          return;\r\n        }\r\n        let remoteVersion = "";\r\n        try {\r\n          const response = await fetch(REMOTE_PACKAGE_JSON, { method: "GET" });\r\n          if (!response.ok) {\r\n            return;\r\n          }\r\n          const data = await response.json();\r\n          if (!data || typeof data.version !== "string") {\r\n            return;\r\n          }\r\n          remoteVersion = data.version.trim();\r\n        } catch {\r\n          return;\r\n        }\r\n        if (!remoteVersion || !isSafeSemverDisplay(remoteVersion)) {\r\n          return;\r\n        }\r\n        if (!isRemoteVersionNewer(pluginCurrentVersion, remoteVersion)) {\r\n          return;\r\n        }\r\n        if (dismissedRemoteVersion === remoteVersion) {\r\n          return;\r\n        }\r\n        pendingUpdateRemoteVersion = remoteVersion;\r\n        updateBannerBodyEl.innerHTML =\r\n          "\u0414\u043E\u0441\u0442\u0443\u043F\u043D\u0430 \u0432\u0435\u0440\u0441\u0438\u044F <strong>" +\r\n          remoteVersion +\r\n          "</strong>, \u0443 \u0432\u0430\u0441 " +\r\n          pluginCurrentVersion +\r\n          ".<br />1. \u0417\u0430\u043A\u0440\u043E\u0439\u0442\u0435 \u043F\u043B\u0430\u0433\u0438\u043D." +\r\n          "<br />2. \u0412 \u043F\u0430\u043F\u043A\u0435 \u043F\u043B\u0430\u0433\u0438\u043D\u0430 \u0437\u0430\u043F\u0443\u0441\u0442\u0438\u0442\u0435 <code>UPDATE.bat</code>." +\r\n          "<br />3. \u041E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 \u043F\u043B\u0430\u0433\u0438\u043D \u0437\u0430\u043D\u043E\u0432\u043E \u2014 \u0432\u043D\u0438\u0437\u0443 \u0434\u043E\u043B\u0436\u043D\u0430 \u0431\u044B\u0442\u044C " +\r\n          remoteVersion +\r\n          ".";\r\n        updateBannerEl.classList.add("is-visible");\r\n      }\r\n\r\n      updateBannerDismissEl.addEventListener("click", () => {\r\n        if (pendingUpdateRemoteVersion) {\r\n          postToPlugin({\r\n            type: "setUpdateBannerDismissed",\r\n            remoteVersion: pendingUpdateRemoteVersion,\r\n          });\r\n        }\r\n        updateBannerEl.classList.remove("is-visible");\r\n        updateBannerBodyEl.textContent = "";\r\n        pendingUpdateRemoteVersion = "";\r\n      });\r\n\r\n      function setMo4Busy(busy, label) {\r\n        mo4CheckEl.disabled = busy;\r\n        mo4FixEl.disabled = busy;\r\n        if (busy) {\r\n          mo4CheckEl.textContent = label || "\u041E\u0431\u0440\u0430\u0431\u043E\u0442\u043A\u0430\u2026";\r\n          mo4FixEl.textContent = label || "\u041E\u0431\u0440\u0430\u0431\u043E\u0442\u043A\u0430\u2026";\r\n        } else {\r\n          mo4CheckEl.textContent = "\u041F\u0440\u043E\u0432\u0435\u0440\u0438\u0442\u044C";\r\n          mo4FixEl.textContent = "\u041F\u043E\u043F\u0440\u0430\u0432\u0438\u0442\u044C";\r\n        }\r\n      }\r\n\r\n      function renderMo4List(violations) {\r\n        mo4ListBodyEl.innerHTML = "";\r\n        mo4ViolationIds = (violations || []).map((v) => v.nodeId);\r\n        mo4SelectAllEl.disabled = mo4ViolationIds.length === 0;\r\n        if (!violations || violations.length === 0) {\r\n          mo4ListTitleEl.textContent = "\u0421\u043B\u043E\u0438 \u0441 \u043D\u0430\u0440\u0443\u0448\u0435\u043D\u0438\u0435\u043C (0)";\r\n          const empty = document.createElement("div");\r\n          empty.className = "list-empty";\r\n          empty.textContent =\r\n            "\u041D\u0430\u0436\u043C\u0438\u0442\u0435 \xAB\u041F\u0440\u043E\u0432\u0435\u0440\u0438\u0442\u044C\xBB, \u0447\u0442\u043E\u0431\u044B \u043F\u043E\u0441\u043C\u043E\u0442\u0440\u0435\u0442\u044C \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u0435.";\r\n          mo4ListBodyEl.appendChild(empty);\r\n          return;\r\n        }\r\n        mo4ListTitleEl.textContent =\r\n          "\u0421\u043B\u043E\u0438 \u0441 \u043D\u0430\u0440\u0443\u0448\u0435\u043D\u0438\u0435\u043C (" + violations.length + ")";\r\n        for (const item of violations) {\r\n          const row = document.createElement("div");\r\n          row.className = "list-item";\r\n          const main = document.createElement("div");\r\n          main.className = "list-item-main";\r\n          const nameEl = document.createElement("div");\r\n          nameEl.className = "list-item-name";\r\n          nameEl.textContent = item.name;\r\n          nameEl.title = item.name;\r\n          const meta = document.createElement("div");\r\n          meta.className = "list-item-meta";\r\n          meta.textContent =\r\n            item.width +\r\n            "\xD7" +\r\n            item.height +\r\n            " \u2192 " +\r\n            item.targetWidth +\r\n            "\xD7" +\r\n            item.targetHeight;\r\n          main.appendChild(nameEl);\r\n          main.appendChild(meta);\r\n          const showBtn = document.createElement("button");\r\n          showBtn.type = "button";\r\n          showBtn.className = "linkish";\r\n          showBtn.textContent = "\u041F\u043E\u043A\u0430\u0437\u0430\u0442\u044C";\r\n          showBtn.addEventListener("click", (event) => {\r\n            event.stopPropagation();\r\n            postToPlugin({ type: "focusNode", nodeId: item.nodeId });\r\n          });\r\n          row.addEventListener("click", () => {\r\n            postToPlugin({ type: "focusNode", nodeId: item.nodeId });\r\n          });\r\n          row.appendChild(main);\r\n          row.appendChild(showBtn);\r\n          mo4ListBodyEl.appendChild(row);\r\n        }\r\n      }\r\n\r\n      renderMo4List([]);\r\n\r\n      /* ---- \u0412\u043A\u043B\u0430\u0434\u043A\u0430 \xAB\u0420\u0435\u043D\u0435\u0439\u043C\u0438\u043D\u0433\xBB ---- */\r\n\r\n      const namesSearchEl = document.getElementById("namesSearch");\r\n      const namesRecentEl = document.getElementById("namesRecent");\r\n      const namesRecentChipsEl = document.getElementById("namesRecentChips");\r\n      const namesTreeEl = document.getElementById("namesTree");\r\n      const namesTreeBodyEl = document.getElementById("namesTreeBody");\r\n      const namesStartEl = document.getElementById("namesStart");\r\n      const namesPreviewEl = document.getElementById("namesPreview");\r\n      const namesUndoEl = document.getElementById("namesUndo");\r\n      const namesEditToggleEl = document.getElementById("namesEditToggle");\r\n      const namesEditBarEl = document.getElementById("namesEditBar");\r\n      const namesAddRootEl = document.getElementById("namesAddRoot");\r\n      const namesResetEl = document.getElementById("namesReset");\r\n      const namesEditHintEl = document.getElementById("namesEditHint");\r\n\r\n      const RECENT_LIMIT = 5;\r\n      const PREVIEW_EDIT =\r\n        "\u041F\u0440\u0430\u0432\u043A\u0430 \u0441\u043F\u0438\u0441\u043A\u0430: \u043A\u043B\u0438\u043A \u043F\u043E \u0441\u0442\u0440\u043E\u043A\u0435 \u2014 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u0442\u044C, + \u2014 \u0432\u043B\u043E\u0436\u0435\u043D\u043D\u044B\u0439 \u0442\u0438\u043F.";\r\n\r\n      /* \u0418\u043D\u043B\u0430\u0439\u043D\u043E\u0432\u044B\u0435 \u0438\u043A\u043E\u043D\u043A\u0438: \u0442\u0435\u043A\u0441\u0442\u043E\u0432\u044B\u0435 \u0433\u043B\u0438\u0444\u044B \xAB+ \u2191 \u2193 \xD7\xBB \u0432\u0441\u0442\u0430\u0432\u0430\u043B\u0438 \u043F\u043E-\u0440\u0430\u0437\u043D\u043E\u043C\u0443\r\n         \u043F\u043E \u0431\u0430\u0437\u043E\u0432\u043E\u0439 \u043B\u0438\u043D\u0438\u0438 \u0438 \u043F\u043B\u043E\u0442\u043D\u043E\u0441\u0442\u0438. */\r\n      const ICON_PATHS = {\r\n        chevron: "M4.5 2.5 L8 6 L4.5 9.5",\r\n        plus: "M6 2.5 V9.5 M2.5 6 H9.5",\r\n        up: "M6 9.5 V2.5 M3 5.5 L6 2.5 L9 5.5",\r\n        down: "M6 2.5 V9.5 M3 6.5 L6 9.5 L9 6.5",\r\n        close: "M3.2 3.2 L8.8 8.8 M8.8 3.2 L3.2 8.8",\r\n      };\r\n\r\n      function createIcon(name) {\r\n        const NS = "http://www.w3.org/2000/svg";\r\n        const svg = document.createElementNS(NS, "svg");\r\n        svg.setAttribute("viewBox", "0 0 12 12");\r\n        svg.setAttribute("width", "12");\r\n        svg.setAttribute("height", "12");\r\n        svg.setAttribute("fill", "none");\r\n        svg.setAttribute("aria-hidden", "true");\r\n        const path = document.createElementNS(NS, "path");\r\n        path.setAttribute("d", ICON_PATHS[name]);\r\n        path.setAttribute("stroke", "currentColor");\r\n        path.setAttribute("stroke-width", "1.5");\r\n        path.setAttribute("stroke-linecap", "round");\r\n        path.setAttribute("stroke-linejoin", "round");\r\n        svg.appendChild(path);\r\n        return svg;\r\n      }\r\n\r\n      let namePresets = [];\r\n      let recentTemplates = [];\r\n      let expandedIds = {};\r\n      let customIds = {};\r\n      let namesFilter = "";\r\n      let selectionCount = 0;\r\n      let hoveredTemplate = "";\r\n      let focusedRowIndex = 0;\r\n\r\n      // \u0420\u0435\u0436\u0438\u043C \u043F\u0440\u0430\u0432\u043A\u0438 \u0434\u0435\u0440\u0435\u0432\u0430. \u041E\u0431\u044B\u0447\u043D\u044B\u0439 \u043A\u043B\u0438\u043A \u043F\u043E \u0441\u0442\u0440\u043E\u043A\u0435 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u044B\u0432\u0430\u0435\u0442 \u0441\u043B\u043E\u0438,\r\n      // \u043F\u043E\u044D\u0442\u043E\u043C\u0443 \u0440\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u043D\u0438\u0435 \u0436\u0438\u0432\u0451\u0442 \u0432 \u043E\u0442\u0434\u0435\u043B\u044C\u043D\u043E\u043C \u0440\u0435\u0436\u0438\u043C\u0435 \u2014 \u043C\u0435\u043D\u044C\u0448\u0435 \u043F\u0440\u043E\u043C\u0430\u0445\u043E\u0432.\r\n      let isEditingPresets = false;\r\n      let editingNodeId = null;\r\n      let pendingAddParentId = undefined;\r\n      let confirmingDeleteId = null;\r\n      let confirmingReset = false;\r\n      let focusAfterRender = null;\r\n\r\n      // \u0417\u0435\u0440\u043A\u0430\u043B\u043E normalizeStartNumber \u0438\u0437 src/domain/layerNamePresets.ts.\r\n      function readStartNumber() {\r\n        const value = Number(namesStartEl.value);\r\n        if (!Number.isFinite(value)) {\r\n          return 1;\r\n        }\r\n        const whole = Math.trunc(value);\r\n        if (whole < 1) {\r\n          return 1;\r\n        }\r\n        return whole > 9999 ? 9999 : whole;\r\n      }\r\n\r\n      // \u0417\u0435\u0440\u043A\u0430\u043B\u043E buildNameForIndex \u0438\u0437 src/domain/layerNamePresets.ts \u2014\r\n      // \u043F\u0440\u0430\u0432\u043A\u0438 \u043D\u0443\u0436\u043D\u043E \u0432\u043D\u043E\u0441\u0438\u0442\u044C \u0432 \u043E\u0431\u043E\u0438\u0445 \u043C\u0435\u0441\u0442\u0430\u0445.\r\n      function previewName(template, index, startNumber) {\r\n        const value = index + startNumber;\r\n        const counter = value < 10 ? "0" + value : String(value);\r\n        if (template.slice(-1) === "_") {\r\n          return template + counter;\r\n        }\r\n        const segments = template.split("_");\r\n        const counterAt = segments.indexOf("01");\r\n        if (counterAt === -1) {\r\n          return template + "_" + counter;\r\n        }\r\n        segments[counterAt] = counter;\r\n        return segments.join("_");\r\n      }\r\n\r\n      function namesForCount(template, count) {\r\n        const start = readStartNumber();\r\n        if (count === 1) {\r\n          return previewName(template, 0, start);\r\n        }\r\n        if (count === 2) {\r\n          return (\r\n            previewName(template, 0, start) +\r\n            ", " +\r\n            previewName(template, 1, start)\r\n          );\r\n        }\r\n        return (\r\n          previewName(template, 0, start) +\r\n          ", " +\r\n          previewName(template, 1, start) +\r\n          " \u2026 " +\r\n          previewName(template, count - 1, start)\r\n        );\r\n      }\r\n\r\n      /**\r\n       * \u041F\u043E\u043B\u043E\u0441\u0430 \u043F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440\u0430 \u2014 \u0435\u0434\u0438\u043D\u0441\u0442\u0432\u0435\u043D\u043D\u043E\u0435 \u043C\u0435\u0441\u0442\u043E, \u0433\u0434\u0435 \u0432\u0438\u0434\u043D\u043E \u0438 \u0441\u043A\u043E\u043B\u044C\u043A\u043E \u0441\u043B\u043E\u0451\u0432\r\n       * \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u043E, \u0438 \u0447\u0442\u043E \u0441 \u043D\u0438\u043C\u0438 \u0441\u0442\u0430\u043D\u0435\u0442. \u0420\u0430\u043D\u044C\u0448\u0435 \u0441\u0447\u0451\u0442\u0447\u0438\u043A \u0436\u0438\u043B \u0432 \u0448\u0430\u043F\u043A\u0435 \u0434\u0435\u0440\u0435\u0432\u0430,\r\n       * \u0432 235px \u043E\u0442 \u0431\u0443\u0434\u0443\u0449\u0438\u0445 \u0438\u043C\u0451\u043D.\r\n       */\r\n      function setPreview(template) {\r\n        hoveredTemplate = template || "";\r\n        if (isEditingPresets) {\r\n          namesPreviewEl.textContent = PREVIEW_EDIT;\r\n          namesPreviewEl.classList.remove("is-active");\r\n          return;\r\n        }\r\n        if (selectionCount === 0) {\r\n          namesPreviewEl.textContent = "\u0412\u044B\u0434\u0435\u043B\u0438\u0442\u0435 \u0441\u043B\u043E\u0438 \u043D\u0430 \u043A\u0430\u043D\u0432\u0430\u0441\u0435";\r\n          namesPreviewEl.classList.remove("is-active");\r\n          return;\r\n        }\r\n        if (!template) {\r\n          namesPreviewEl.textContent =\r\n            pluralLayers(selectionCount) + " \u2014 \u043D\u0430\u0432\u0435\u0434\u0438\u0442\u0435 \u043D\u0430 \u0442\u0438\u043F";\r\n          namesPreviewEl.classList.remove("is-active");\r\n          return;\r\n        }\r\n        namesPreviewEl.textContent =\r\n          selectionCount + " \u2192 " + namesForCount(template, selectionCount);\r\n        namesPreviewEl.classList.add("is-active");\r\n      }\r\n\r\n      /** \u0427\u0442\u043E \u043F\u0440\u043E\u0438\u0437\u043E\u0439\u0434\u0451\u0442 \u0441 \u0432\u043B\u043E\u0436\u0435\u043D\u043D\u044B\u043C\u0438 \u043F\u0440\u0438 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u043D\u0438\u0438 \u0432\u0435\u0442\u043A\u0438. */\r\n      function setCascadePreview(node, nextTemplate) {\r\n        const template = nextTemplate.trim();\r\n        const affected = [];\r\n        const walk = (nodes) => {\r\n          for (const child of nodes) {\r\n            if (child.template.indexOf(node.template) === 0) {\r\n              affected.push(child);\r\n            }\r\n            walk(child.children || []);\r\n          }\r\n        };\r\n        walk(node.children || []);\r\n\r\n        if (template.length === 0) {\r\n          namesPreviewEl.textContent = "\u041F\u0443\u0441\u0442\u043E\u0435 \u0438\u043C\u044F \u2014 Enter \u043D\u0435 \u0441\u043E\u0445\u0440\u0430\u043D\u0438\u0442";\r\n          namesPreviewEl.classList.remove("is-active");\r\n          return;\r\n        }\r\n        if (template === node.template) {\r\n          namesPreviewEl.textContent =\r\n            affected.length > 0\r\n              ? "\u0412\u043B\u043E\u0436\u0435\u043D\u043D\u044B\u0445 \u043E\u0431\u043D\u043E\u0432\u0438\u0442\u0441\u044F \u0432\u043C\u0435\u0441\u0442\u0435: " + affected.length\r\n              : "\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043D\u043E\u0432\u043E\u0435 \u0438\u043C\u044F   \xB7   Esc \u2014 \u043E\u0442\u043C\u0435\u043D\u0430";\r\n          namesPreviewEl.classList.remove("is-active");\r\n          return;\r\n        }\r\n        if (affected.length === 0) {\r\n          namesPreviewEl.textContent =\r\n            node.template + " \u2192 " + template + "   \xB7   Enter, Esc \u2014 \u043E\u0442\u043C\u0435\u043D\u0430";\r\n          namesPreviewEl.classList.add("is-active");\r\n          return;\r\n        }\r\n        const sample =\r\n          template + affected[0].template.slice(node.template.length);\r\n        namesPreviewEl.textContent =\r\n          affected[0].template +\r\n          " \u2192 " +\r\n          sample +\r\n          (affected.length > 1 ? ", \u0438 \u0435\u0449\u0451 " + (affected.length - 1) : "");\r\n        namesPreviewEl.classList.add("is-active");\r\n      }\r\n\r\n      function setSelectionCount(count) {\r\n        selectionCount = count;\r\n        if (!isEditingPresets) {\r\n          setPreview(hoveredTemplate);\r\n        }\r\n      }\r\n\r\n      function matchesFilter(node, query) {\r\n        if (node.template.toLowerCase().indexOf(query) !== -1) {\r\n          return true;\r\n        }\r\n        const children = node.children || [];\r\n        for (const child of children) {\r\n          if (matchesFilter(child, query)) {\r\n            return true;\r\n          }\r\n        }\r\n        return false;\r\n      }\r\n\r\n      function createRowShell(depth) {\r\n        const row = document.createElement("div");\r\n        row.className = "tree-row";\r\n        row.style.setProperty("--depth", String(depth));\r\n        return row;\r\n      }\r\n\r\n      function createSpacer() {\r\n        const spacer = document.createElement("button");\r\n        spacer.type = "button";\r\n        spacer.className = "tree-toggle is-leaf";\r\n        spacer.tabIndex = -1;\r\n        spacer.setAttribute("aria-hidden", "true");\r\n        return spacer;\r\n      }\r\n\r\n      function createIconButton(icon, label, onClick, danger) {\r\n        const button = document.createElement("button");\r\n        button.type = "button";\r\n        button.className = "icon-btn" + (danger ? " is-danger" : "");\r\n        button.appendChild(createIcon(icon));\r\n        button.title = label;\r\n        button.tabIndex = -1;\r\n        button.setAttribute("aria-label", label);\r\n        button.addEventListener("click", (event) => {\r\n          event.stopPropagation();\r\n          onClick();\r\n        });\r\n        return button;\r\n      }\r\n\r\n      /** \u0421\u0442\u0440\u043E\u043A\u0430-\u0438\u043D\u043F\u0443\u0442: \u0438\u043D\u043B\u0430\u0439\u043D-\u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u043D\u0438\u0435 \u0438 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u0438\u0435 \u043D\u043E\u0432\u043E\u0433\u043E \u0442\u0438\u043F\u0430. */\r\n      function createInputRow(depth, value, onCommit, onCancel, onInput) {\r\n        const row = createRowShell(depth);\r\n        row.appendChild(createSpacer());\r\n\r\n        const input = document.createElement("input");\r\n        input.type = "text";\r\n        input.className = "tree-input";\r\n        input.value = value;\r\n        input.spellcheck = false;\r\n        input.autocomplete = "off";\r\n\r\n        let settled = false;\r\n        const commit = () => {\r\n          if (settled) return;\r\n          settled = true;\r\n          onCommit(input.value);\r\n        };\r\n        const cancel = () => {\r\n          if (settled) return;\r\n          settled = true;\r\n          onCancel();\r\n        };\r\n\r\n        input.addEventListener("keydown", (event) => {\r\n          if (event.key === "Enter") {\r\n            event.preventDefault();\r\n            commit();\r\n          } else if (event.key === "Escape") {\r\n            event.preventDefault();\r\n            cancel();\r\n          }\r\n        });\r\n        input.addEventListener("blur", commit);\r\n        if (onInput) {\r\n          input.addEventListener("input", () => onInput(input.value));\r\n          onInput(input.value);\r\n        }\r\n\r\n        row.appendChild(input);\r\n        focusAfterRender = input;\r\n        return row;\r\n      }\r\n\r\n      function createDeleteConfirmRow(node, depth) {\r\n        const row = createRowShell(depth);\r\n        row.appendChild(createSpacer());\r\n\r\n        const wrap = document.createElement("div");\r\n        wrap.className = "tree-confirm";\r\n        const label = document.createElement("span");\r\n        const nested = countPresetNodes(node.children || []);\r\n        // \u0418\u043C\u044F \u043E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u043E: \u0438\u043D\u0430\u0447\u0435 \u043F\u043E\u0441\u043B\u0435 \u0441\u043A\u0440\u043E\u043B\u043B\u0430 \u043D\u0435\u043F\u043E\u043D\u044F\u0442\u043D\u043E, \u0447\u0442\u043E \u0443\u0434\u0430\u043B\u044F\u0435\u0448\u044C.\r\n        label.textContent = nested > 0\r\n          ? "\u0423\u0434\u0430\u043B\u0438\u0442\u044C " + node.template + " \u0438 " + nested + " \u0432\u043B\u043E\u0436\u0435\u043D\u043D\u044B\u0445?"\r\n          : "\u0423\u0434\u0430\u043B\u0438\u0442\u044C " + node.template + "?";\r\n        label.title = label.textContent;\r\n        wrap.appendChild(label);\r\n\r\n        const yes = document.createElement("button");\r\n        yes.type = "button";\r\n        yes.className = "is-danger";\r\n        yes.textContent = "\u0423\u0434\u0430\u043B\u0438\u0442\u044C";\r\n        yes.addEventListener("click", () => {\r\n          confirmingDeleteId = null;\r\n          postToPlugin({ type: "removePreset", id: node.id });\r\n        });\r\n\r\n        const no = document.createElement("button");\r\n        no.type = "button";\r\n        no.textContent = "\u041E\u0442\u043C\u0435\u043D\u0430";\r\n        no.addEventListener("click", () => {\r\n          confirmingDeleteId = null;\r\n          renderNamesTree();\r\n        });\r\n\r\n        wrap.appendChild(yes);\r\n        wrap.appendChild(no);\r\n        row.appendChild(wrap);\r\n        return row;\r\n      }\r\n\r\n      function createTreeRow(node, depth, expanded) {\r\n        const children = node.children || [];\r\n        const hasChildren = children.length > 0;\r\n        const row = createRowShell(depth);\r\n        row.setAttribute("role", "treeitem");\r\n        row.dataset.id = node.id;\r\n        if (hasChildren) {\r\n          row.setAttribute("aria-expanded", expanded ? "true" : "false");\r\n        }\r\n\r\n        const toggle = document.createElement("button");\r\n        toggle.type = "button";\r\n        toggle.className = hasChildren ? "tree-toggle" : "tree-toggle is-leaf";\r\n        toggle.tabIndex = -1;\r\n        toggle.appendChild(createIcon("chevron"));\r\n        if (hasChildren) {\r\n          toggle.setAttribute("aria-expanded", expanded ? "true" : "false");\r\n          toggle.setAttribute(\r\n            "aria-label",\r\n            (expanded ? "\u0421\u0432\u0435\u0440\u043D\u0443\u0442\u044C " : "\u0420\u0430\u0441\u043A\u0440\u044B\u0442\u044C ") + node.template\r\n          );\r\n          toggle.addEventListener("click", () => {\r\n            expandedIds[node.id] = !expanded;\r\n            renderNamesTree();\r\n          });\r\n        } else {\r\n          toggle.setAttribute("aria-hidden", "true");\r\n        }\r\n\r\n        const isGroup = node.template.slice(-1) === "_";\r\n        const apply = document.createElement("button");\r\n        apply.type = "button";\r\n        apply.className =\r\n          "tree-apply " +\r\n          (isGroup ? "is-group" : "is-leaf") +\r\n          (isEditingPresets && customIds[node.id] ? " is-custom" : "");\r\n        apply.textContent = node.template;\r\n        apply.tabIndex = -1;\r\n        if (isEditingPresets) {\r\n          apply.title = "\u041F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u0442\u044C \u0442\u0438\u043F";\r\n          apply.addEventListener("click", () => startRenamePreset(node.id));\r\n        } else {\r\n          apply.title =\r\n            "\u041F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u0442\u044C \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u0435 \u2192 " + previewName(node.template, 0);\r\n          apply.addEventListener("click", () => applyNamePreset(node.template));\r\n          apply.addEventListener("mouseenter", () => setPreview(node.template));\r\n          apply.addEventListener("focus", () => setPreview(node.template));\r\n          apply.addEventListener("mouseleave", () => setPreview(""));\r\n          apply.addEventListener("blur", () => setPreview(""));\r\n        }\r\n\r\n        row.appendChild(toggle);\r\n        row.appendChild(apply);\r\n\r\n        const actions = document.createElement("div");\r\n        actions.className = "tree-actions";\r\n        actions.appendChild(\r\n          createIconButton("plus", "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C \u0432\u043B\u043E\u0436\u0435\u043D\u043D\u044B\u0439 \u0442\u0438\u043F", () =>\r\n            startAddPreset(node.id)\r\n          )\r\n        );\r\n        actions.appendChild(\r\n          createIconButton("up", "\u041F\u0435\u0440\u0435\u043C\u0435\u0441\u0442\u0438\u0442\u044C \u0432\u0432\u0435\u0440\u0445", () =>\r\n            postToPlugin({ type: "movePreset", id: node.id, direction: "up" })\r\n          )\r\n        );\r\n        actions.appendChild(\r\n          createIconButton("down", "\u041F\u0435\u0440\u0435\u043C\u0435\u0441\u0442\u0438\u0442\u044C \u0432\u043D\u0438\u0437", () =>\r\n            postToPlugin({ type: "movePreset", id: node.id, direction: "down" })\r\n          )\r\n        );\r\n        actions.appendChild(\r\n          createIconButton(\r\n            "close",\r\n            "\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u0442\u0438\u043F",\r\n            () => {\r\n              confirmingDeleteId = node.id;\r\n              renderNamesTree();\r\n            },\r\n            true\r\n          )\r\n        );\r\n        row.appendChild(actions);\r\n        return row;\r\n      }\r\n\r\n      function countPresetNodes(nodes) {\r\n        let total = 0;\r\n        for (const node of nodes) {\r\n          total++;\r\n          total += countPresetNodes(node.children || []);\r\n        }\r\n        return total;\r\n      }\r\n\r\n      function renderNamesTree() {\r\n        const query = namesFilter.trim().toLowerCase();\r\n        namesTreeBodyEl.innerHTML = "";\r\n        focusAfterRender = null;\r\n        let rendered = 0;\r\n\r\n        const walk = (nodes, depth) => {\r\n          for (const node of nodes) {\r\n            if (query && !matchesFilter(node, query)) {\r\n              continue;\r\n            }\r\n            const children = node.children || [];\r\n            const expanded = query ? true : Boolean(expandedIds[node.id]);\r\n\r\n            if (editingNodeId === node.id) {\r\n              namesTreeBodyEl.appendChild(\r\n                createInputRow(\r\n                  depth,\r\n                  node.template,\r\n                  (value) => commitRenamePreset(node.id, value),\r\n                  () => {\r\n                    editingNodeId = null;\r\n                    renderNamesTree();\r\n                    setPreview("");\r\n                  },\r\n                  (value) => setCascadePreview(node, value)\r\n                )\r\n              );\r\n            } else if (confirmingDeleteId === node.id) {\r\n              namesTreeBodyEl.appendChild(createDeleteConfirmRow(node, depth));\r\n            } else {\r\n              namesTreeBodyEl.appendChild(createTreeRow(node, depth, expanded));\r\n            }\r\n            rendered++;\r\n\r\n            if (pendingAddParentId === node.id) {\r\n              namesTreeBodyEl.appendChild(\r\n                createInputRow(\r\n                  depth + 1,\r\n                  "",\r\n                  (value) => commitAddPreset(node.id, value),\r\n                  cancelAddPreset,\r\n                  setAddPreview\r\n                )\r\n              );\r\n            }\r\n            if (children.length > 0 && expanded) {\r\n              walk(children, depth + 1);\r\n            }\r\n          }\r\n        };\r\n        walk(namePresets, 0);\r\n\r\n        if (pendingAddParentId === null) {\r\n          namesTreeBodyEl.appendChild(\r\n            createInputRow(\r\n              0,\r\n              "",\r\n              (value) => commitAddPreset(null, value),\r\n              cancelAddPreset,\r\n              setAddPreview\r\n            )\r\n          );\r\n          rendered++;\r\n        }\r\n\r\n        if (rendered === 0) {\r\n          const empty = document.createElement("div");\r\n          empty.className = "tree-empty";\r\n          empty.textContent = namePresets.length === 0\r\n            ? "\u0417\u0430\u0433\u0440\u0443\u0436\u0430\u044E \u0442\u0438\u043F\u044B\u2026"\r\n            : "\u041D\u0438\u0447\u0435\u0433\u043E \u043D\u0435 \u043D\u0430\u0448\u043B\u043E\u0441\u044C.";\r\n          namesTreeBodyEl.appendChild(empty);\r\n        }\r\n\r\n        applyRovingTabindex();\r\n\r\n        if (focusAfterRender) {\r\n          const input = focusAfterRender;\r\n          focusAfterRender = null;\r\n          input.focus();\r\n          input.select();\r\n        }\r\n      }\r\n\r\n      function setAddPreview(value) {\r\n        const template = value.trim();\r\n        namesPreviewEl.textContent = template\r\n          ? "\u041D\u043E\u0432\u044B\u0439 \u0442\u0438\u043F " + template + "   \xB7   Enter, Esc \u2014 \u043E\u0442\u043C\u0435\u043D\u0430"\r\n          : "\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u0438\u043C\u044F \u0442\u0438\u043F\u0430   \xB7   Esc \u2014 \u043E\u0442\u043C\u0435\u043D\u0430";\r\n        namesPreviewEl.classList.toggle("is-active", template.length > 0);\r\n      }\r\n\r\n      /* \u041A\u043B\u0430\u0432\u0438\u0430\u0442\u0443\u0440\u0430: \u0442\u0430\u0431\u0431\u0435\u043B\u044C\u043D\u0430 \u0442\u043E\u043B\u044C\u043A\u043E \u043E\u0434\u043D\u0430 \u0441\u0442\u0440\u043E\u043A\u0430 \u0434\u0435\u0440\u0435\u0432\u0430, \u0432\u043D\u0443\u0442\u0440\u0438 \u0445\u043E\u0434\u0438\u043C\r\n         \u0441\u0442\u0440\u0435\u043B\u043A\u0430\u043C\u0438. \u0418\u043D\u0430\u0447\u0435 \u043D\u0430 71 \u0441\u0442\u0440\u043E\u043A\u0435 \u043F\u043E\u043B\u0443\u0447\u0430\u0435\u0442\u0441\u044F \u0431\u043E\u043B\u044C\u0448\u0435 \u0441\u043E\u0442\u043D\u0438 \u0442\u0430\u0431\u0441\u0442\u043E\u043F\u043E\u0432. */\r\n      function treeRows() {\r\n        return [...namesTreeBodyEl.querySelectorAll(\'[role="treeitem"]\')];\r\n      }\r\n\r\n      function applyRovingTabindex() {\r\n        const rows = treeRows();\r\n        if (rows.length === 0) return;\r\n        if (focusedRowIndex >= rows.length) focusedRowIndex = rows.length - 1;\r\n        if (focusedRowIndex < 0) focusedRowIndex = 0;\r\n        rows.forEach((row, index) => {\r\n          row.tabIndex = index === focusedRowIndex ? 0 : -1;\r\n        });\r\n      }\r\n\r\n      function focusRow(index, rows) {\r\n        const all = rows || treeRows();\r\n        if (all.length === 0) return;\r\n        focusedRowIndex = Math.max(0, Math.min(index, all.length - 1));\r\n        applyRovingTabindex();\r\n        all[focusedRowIndex].focus();\r\n      }\r\n\r\n      function nodeForRow(row) {\r\n        return row ? findPresetNode(namePresets, row.dataset.id) : null;\r\n      }\r\n\r\n      namesTreeBodyEl.addEventListener("focusin", (event) => {\r\n        const row = event.target.closest(\'[role="treeitem"]\');\r\n        if (!row) return;\r\n        const rows = treeRows();\r\n        const index = rows.indexOf(row);\r\n        if (index !== -1) {\r\n          focusedRowIndex = index;\r\n          applyRovingTabindex();\r\n        }\r\n        const node = nodeForRow(row);\r\n        if (node && !isEditingPresets) {\r\n          setPreview(node.template);\r\n        }\r\n      });\r\n\r\n      namesTreeBodyEl.addEventListener("keydown", (event) => {\r\n        const row = event.target.closest(\'[role="treeitem"]\');\r\n        if (!row) return;\r\n        const rows = treeRows();\r\n        const index = rows.indexOf(row);\r\n        const node = nodeForRow(row);\r\n        if (!node) return;\r\n        const hasChildren = (node.children || []).length > 0;\r\n        const expanded = Boolean(expandedIds[node.id]);\r\n\r\n        if (event.key === "ArrowDown") {\r\n          event.preventDefault();\r\n          focusRow(index + 1, rows);\r\n        } else if (event.key === "ArrowUp") {\r\n          event.preventDefault();\r\n          focusRow(index - 1, rows);\r\n        } else if (event.key === "ArrowRight") {\r\n          event.preventDefault();\r\n          if (hasChildren && !expanded) {\r\n            expandedIds[node.id] = true;\r\n            renderNamesTree();\r\n            focusRow(index, treeRows());\r\n          } else {\r\n            focusRow(index + 1, rows);\r\n          }\r\n        } else if (event.key === "ArrowLeft") {\r\n          event.preventDefault();\r\n          if (hasChildren && expanded) {\r\n            expandedIds[node.id] = false;\r\n            renderNamesTree();\r\n            focusRow(index, treeRows());\r\n          } else {\r\n            focusRow(index - 1, rows);\r\n          }\r\n        } else if (event.key === "Enter" || event.key === " ") {\r\n          event.preventDefault();\r\n          if (isEditingPresets) {\r\n            startRenamePreset(node.id);\r\n          } else {\r\n            applyNamePreset(node.template);\r\n          }\r\n        } else if (event.key === "Delete" && isEditingPresets) {\r\n          event.preventDefault();\r\n          confirmingDeleteId = node.id;\r\n          renderNamesTree();\r\n        }\r\n      });\r\n\r\n      /* \u041F\u0440\u0430\u0432\u043A\u0430 \u0434\u0435\u0440\u0435\u0432\u0430: \u043D\u0430\u043C\u0435\u0440\u0435\u043D\u0438\u0435 \u0443\u0445\u043E\u0434\u0438\u0442 \u0432 main, \u043E\u0442\u0442\u0443\u0434\u0430 \u043F\u0440\u0438\u0445\u043E\u0434\u0438\u0442 \u043D\u043E\u0432\u043E\u0435 \u0434\u0435\u0440\u0435\u0432\u043E. */\r\n\r\n      function setEditingPresets(editing) {\r\n        isEditingPresets = editing;\r\n        editingNodeId = null;\r\n        pendingAddParentId = undefined;\r\n        confirmingDeleteId = null;\r\n        confirmingReset = false;\r\n        namesTreeEl.classList.toggle("is-editing", editing);\r\n        namesEditToggleEl.textContent = editing ? "\u0413\u043E\u0442\u043E\u0432\u043E" : "\u0418\u0437\u043C\u0435\u043D\u0438\u0442\u044C";\r\n        namesEditToggleEl.setAttribute("aria-pressed", editing ? "true" : "false");\r\n        renderResetControl();\r\n        renderRecent();\r\n        setSelectionCount(selectionCount);\r\n        setPreview("");\r\n        renderNamesTree();\r\n      }\r\n\r\n      function startRenamePreset(id) {\r\n        editingNodeId = id;\r\n        pendingAddParentId = undefined;\r\n        confirmingDeleteId = null;\r\n        renderNamesTree();\r\n      }\r\n\r\n      function findPresetNode(nodes, id) {\r\n        for (const node of nodes) {\r\n          if (node.id === id) {\r\n            return node;\r\n          }\r\n          const found = findPresetNode(node.children || [], id);\r\n          if (found) {\r\n            return found;\r\n          }\r\n        }\r\n        return null;\r\n      }\r\n\r\n      function commitRenamePreset(id, value) {\r\n        const template = value.trim();\r\n        const current = findPresetNode(namePresets, id);\r\n        editingNodeId = null;\r\n        if (template.length === 0) {\r\n          namesStatusEl.textContent = "\u041F\u0443\u0441\u0442\u043E\u0435 \u0438\u043C\u044F \u2014 \u043E\u0441\u0442\u0430\u0432\u0438\u043B \u043A\u0430\u043A \u0431\u044B\u043B\u043E.";\r\n          renderNamesTree();\r\n          return;\r\n        }\r\n        // \u0418\u043D\u043F\u0443\u0442 \u0437\u0430\u043A\u0440\u044B\u0432\u0430\u0435\u0442\u0441\u044F \u0438 \u043F\u043E blur \u2014 \xAB\u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u043D\u0438\u0435\xBB \u0432 \u0442\u043E \u0436\u0435 \u0438\u043C\u044F \u043D\u0435 \u0448\u043B\u0451\u043C.\r\n        if (current && current.template === template) {\r\n          renderNamesTree();\r\n          return;\r\n        }\r\n        postToPlugin({ type: "renamePreset", id, template });\r\n      }\r\n\r\n      function startAddPreset(parentId) {\r\n        // \u041D\u043E\u0432\u044B\u0439 \u0442\u0438\u043F \u043C\u043E\u0436\u0435\u0442 \u043D\u0435 \u043F\u043E\u043F\u0430\u0441\u0442\u044C \u043F\u043E\u0434 \u0444\u0438\u043B\u044C\u0442\u0440 \u2014 \u043F\u043E\u043A\u0430\u0437\u044B\u0432\u0430\u0435\u043C \u0432\u0435\u0441\u044C \u0441\u043F\u0438\u0441\u043E\u043A.\r\n        namesFilter = "";\r\n        namesSearchEl.value = "";\r\n        pendingAddParentId = parentId;\r\n        editingNodeId = null;\r\n        confirmingDeleteId = null;\r\n        if (parentId) {\r\n          expandedIds[parentId] = true;\r\n        }\r\n        renderNamesTree();\r\n      }\r\n\r\n      function cancelAddPreset() {\r\n        pendingAddParentId = undefined;\r\n        renderNamesTree();\r\n      }\r\n\r\n      function commitAddPreset(parentId, value) {\r\n        const template = value.trim();\r\n        pendingAddParentId = undefined;\r\n        if (template.length === 0) {\r\n          renderNamesTree();\r\n          return;\r\n        }\r\n        postToPlugin({ type: "addPreset", parentId, template });\r\n      }\r\n\r\n      function renderResetControl() {\r\n        const customCount = Object.keys(customIds).length;\r\n        namesResetEl.textContent = confirmingReset\r\n          ? "\u0422\u043E\u0447\u043D\u043E \u0441\u0431\u0440\u043E\u0441\u0438\u0442\u044C?"\r\n          : customCount > 0\r\n            ? "\u0421\u0431\u0440\u043E\u0441\u0438\u0442\u044C (" + customCount + ")"\r\n            : "\u0421\u0431\u0440\u043E\u0441\u0438\u0442\u044C";\r\n        namesEditHintEl.textContent = confirmingReset\r\n          ? "\u0441\u0432\u043E\u0438 \u043F\u0440\u0430\u0432\u043A\u0438 \u0431\u0443\u0434\u0443\u0442 \u043F\u043E\u0442\u0435\u0440\u044F\u043D\u044B"\r\n          : "\u043A\u043B\u0438\u043A \u043F\u043E \u0441\u0442\u0440\u043E\u043A\u0435 \u2014 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u0442\u044C";\r\n      }\r\n\r\n      namesEditToggleEl.addEventListener("click", () => {\r\n        setEditingPresets(!isEditingPresets);\r\n      });\r\n\r\n      namesAddRootEl.addEventListener("click", () => {\r\n        confirmingReset = false;\r\n        renderResetControl();\r\n        startAddPreset(null);\r\n      });\r\n\r\n      namesUndoEl.addEventListener("click", () => {\r\n        postToPlugin({ type: "undoPresetEdit" });\r\n      });\r\n\r\n      namesResetEl.addEventListener("click", () => {\r\n        if (!confirmingReset) {\r\n          confirmingReset = true;\r\n          renderResetControl();\r\n          return;\r\n        }\r\n        confirmingReset = false;\r\n        renderResetControl();\r\n        postToPlugin({ type: "resetPresets" });\r\n      });\r\n\r\n      function renderRecent() {\r\n        namesRecentChipsEl.innerHTML = "";\r\n        // \u0412 \u0440\u0435\u0436\u0438\u043C\u0435 \u043F\u0440\u0430\u0432\u043A\u0438 \u0447\u0438\u043F\u0441\u044B \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u044B\u0432\u0430\u043B\u0438 \u0431\u044B \u0441\u043B\u043E\u0438 \u2014 \u043F\u0440\u044F\u0447\u0435\u043C \u0438\u0445.\r\n        namesRecentEl.classList.toggle(\r\n          "is-visible",\r\n          recentTemplates.length > 0 && !isEditingPresets\r\n        );\r\n        for (const template of recentTemplates) {\r\n          const chip = document.createElement("button");\r\n          chip.type = "button";\r\n          chip.className = "chip";\r\n          chip.textContent = template;\r\n          chip.title = "\u041F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u0442\u044C \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u0435 \u2192 " + previewName(template, 0);\r\n          chip.addEventListener("click", () => applyNamePreset(template));\r\n          chip.addEventListener("mouseenter", () => setPreview(template));\r\n          chip.addEventListener("focus", () => setPreview(template));\r\n          chip.addEventListener("mouseleave", () => setPreview(""));\r\n          chip.addEventListener("blur", () => setPreview(""));\r\n          namesRecentChipsEl.appendChild(chip);\r\n        }\r\n      }\r\n\r\n      function rememberTemplate(template) {\r\n        recentTemplates = [template].concat(\r\n          recentTemplates.filter((item) => item !== template)\r\n        );\r\n        if (recentTemplates.length > RECENT_LIMIT) {\r\n          recentTemplates = recentTemplates.slice(0, RECENT_LIMIT);\r\n        }\r\n        renderRecent();\r\n        postToPlugin({\r\n          type: "setRecentNamePresets",\r\n          templates: recentTemplates,\r\n        });\r\n      }\r\n\r\n      function applyNamePreset(template) {\r\n        if (isEditingPresets) {\r\n          return;\r\n        }\r\n        if (selectionCount === 0) {\r\n          namesStatusEl.textContent =\r\n            "\u0412\u044B\u0434\u0435\u043B\u0438\u0442\u0435 \u0441\u043B\u043E\u0438 \u043D\u0430 \u043A\u0430\u043D\u0432\u0430\u0441\u0435 \u2014 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u0443\u044E \u0438\u0445 \u0441\u0432\u0435\u0440\u0445\u0443 \u0432\u043D\u0438\u0437.";\r\n          return;\r\n        }\r\n        namesStatusEl.textContent = "\u041F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u043D\u0438\u0435\u2026";\r\n        rememberTemplate(template);\r\n        postToPlugin({\r\n          type: "renameLayers",\r\n          template,\r\n          startNumber: readStartNumber(),\r\n        });\r\n      }\r\n\r\n      namesSearchEl.addEventListener("input", () => {\r\n        namesFilter = namesSearchEl.value;\r\n        renderNamesTree();\r\n      });\r\n\r\n      // \u041F\u0435\u0440\u0435\u0441\u0447\u0438\u0442\u044B\u0432\u0430\u0435\u043C \u043F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440 \u043F\u0440\u044F\u043C\u043E \u0432\u043E \u0432\u0440\u0435\u043C\u044F \u0432\u0432\u043E\u0434\u0430: hoveredTemplate \u0445\u0440\u0430\u043D\u0438\u0442\u0441\u044F\r\n      // \u043A\u0430\u043A \u0440\u0430\u0437 \u0434\u043B\u044F \u0442\u0430\u043A\u043E\u0433\u043E \u043E\u0431\u043D\u043E\u0432\u043B\u0435\u043D\u0438\u044F.\r\n      namesStartEl.addEventListener("input", () => {\r\n        if (!isEditingPresets) {\r\n          setPreview(hoveredTemplate);\r\n        }\r\n      });\r\n\r\n      // \u041D\u0430 \u0432\u044B\u0445\u043E\u0434\u0435 \u0438\u0437 \u043F\u043E\u043B\u044F \u043F\u043E\u043A\u0430\u0437\u044B\u0432\u0430\u0435\u043C \u0442\u043E, \u0447\u0442\u043E \u0440\u0435\u0430\u043B\u044C\u043D\u043E \u0443\u0439\u0434\u0451\u0442 \u0432 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u043D\u0438\u0435:\r\n      // \xABabc\xBB, \xAB0\xBB, \xAB-3\xBB \u0438 \u043F\u0443\u0441\u0442\u043E\u0435 \u0441\u0445\u043B\u043E\u043F\u044B\u0432\u0430\u044E\u0442\u0441\u044F \u0432 1.\r\n      namesStartEl.addEventListener("change", () => {\r\n        namesStartEl.value = String(readStartNumber());\r\n      });\r\n      namesStartEl.addEventListener("blur", () => {\r\n        namesStartEl.value = String(readStartNumber());\r\n      });\r\n\r\n      renderResetControl();\r\n      setPreview("");\r\n      setSelectionCount(0);\r\n      renderNamesTree();\r\n      renderRecent();\r\n      postToPlugin({ type: "getRecentNamePresets" });\r\n\r\n      goRasterEl.addEventListener("click", () => {\r\n        rasterStatusEl.textContent = "\u041E\u0431\u0440\u0430\u0431\u043E\u0442\u043A\u0430\u2026";\r\n        goRasterEl.disabled = true;\r\n        postToPlugin({\r\n          type: "rasterize",\r\n          scale: parseFloat(scaleEl.value),\r\n          originalDisposition,\r\n        });\r\n      });\r\n\r\n      function renderPsdWarnings(warnings) {\r\n        psdWarnBodyEl.innerHTML = "";\r\n        if (!warnings || warnings.length === 0) {\r\n          psdWarnWrapEl.hidden = true;\r\n          return;\r\n        }\r\n        psdWarnWrapEl.hidden = false;\r\n        for (const warning of warnings) {\r\n          const row = document.createElement("div");\r\n          row.className = "list-item";\r\n          row.textContent = warning;\r\n          psdWarnBodyEl.appendChild(row);\r\n        }\r\n      }\r\n\r\n      function setPsdBusy(busy) {\r\n        goPsdEl.disabled = busy;\r\n        psdCancelEl.hidden = !busy;\r\n        psdProgressWrapEl.hidden = !busy;\r\n        if (!busy) {\r\n          psdProgressBarEl.style.width = "0%";\r\n        }\r\n      }\r\n\r\n      psdBridge.configure({\r\n        postToPlugin,\r\n        onProgress(done, total, layerName) {\r\n          const share = total > 0 ? Math.round((done / total) * 100) : 0;\r\n          psdProgressBarEl.style.width = share + "%";\r\n          if (done < total) {\r\n            psdStatusEl.textContent =\r\n              "\u0421\u043B\u043E\u0439 " + (done + 1) + " \u0438\u0437 " + total + (layerName ? " \u2014 " + layerName : "");\r\n          } else {\r\n            psdStatusEl.textContent = "\u0421\u043E\u0431\u0438\u0440\u0430\u044E \u0444\u0430\u0439\u043B\u2026";\r\n          }\r\n        },\r\n        onStatus(text) {\r\n          psdStatusEl.textContent = text;\r\n        },\r\n        onWarnings: renderPsdWarnings,\r\n        onBusy: setPsdBusy,\r\n      });\r\n\r\n      goPsdEl.addEventListener("click", () => {\r\n        psdStatusEl.textContent = "\u0413\u043E\u0442\u043E\u0432\u043B\u044E \u044D\u043A\u0441\u043F\u043E\u0440\u0442\u2026";\r\n        renderPsdWarnings([]);\r\n        psdBridge.reset();\r\n        setPsdBusy(true);\r\n        postToPlugin({\r\n          type: "psdExportStart",\r\n          scale: parseFloat(psdScaleEl.value),\r\n        });\r\n      });\r\n\r\n      psdCancelEl.addEventListener("click", () => {\r\n        psdBridge.cancel();\r\n      });\r\n\r\n      mo4CheckEl.addEventListener("click", () => {\r\n        mo4StatusEl.textContent = "";\r\n        setMo4Busy(true);\r\n        postToPlugin({ type: "multipleOfFourCheck" });\r\n      });\r\n\r\n      mo4SelectAllEl.addEventListener("click", () => {\r\n        if (mo4ViolationIds.length === 0) return;\r\n        postToPlugin({ type: "selectNodes", nodeIds: mo4ViolationIds });\r\n      });\r\n\r\n      mo4FixEl.addEventListener("click", () => {\r\n        mo4StatusEl.textContent = "";\r\n        setMo4Busy(true);\r\n        postToPlugin({ type: "multipleOfFourFix" });\r\n      });\r\n\r\n      function renderMo4Debug(lines) {\r\n        const text = Array.isArray(lines) ? lines.join("\\n") : "";\r\n        mo4DebugTextEl.value = text;\r\n        mo4DebugWrapEl.hidden = text === "";\r\n        mo4DebugWrapEl.open = text !== "";\r\n      }\r\n\r\n      mo4DebugCopyEl.addEventListener("click", () => {\r\n        if (!mo4DebugTextEl.value) return;\r\n        // \u0412 iframe \u043F\u043B\u0430\u0433\u0438\u043D\u0430 navigator.clipboard \u0447\u0430\u0441\u0442\u043E \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D, \u043F\u043E\u044D\u0442\u043E\u043C\u0443 \u043A\u043E\u043F\u0438\u0440\u0443\u0435\u043C\r\n        // \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u0435\u043C \u0441\u0430\u043C\u043E\u0433\u043E textarea \u2014 \u043E\u043D \u0438 \u0442\u0430\u043A \u043D\u0430 \u044D\u043A\u0440\u0430\u043D\u0435.\r\n        mo4DebugTextEl.focus();\r\n        mo4DebugTextEl.select();\r\n        let copied = false;\r\n        try {\r\n          copied = document.execCommand("copy");\r\n        } catch (error) {\r\n          copied = false;\r\n        }\r\n        mo4DebugCopyEl.textContent = copied\r\n          ? "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u043E"\r\n          : "\u041D\u0435 \u0432\u044B\u0448\u043B\u043E \u2014 \u0432\u044B\u0434\u0435\u043B\u0438\u0442\u0435 \u0438 Ctrl+C";\r\n        setTimeout(() => {\r\n          mo4DebugCopyEl.textContent = "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u0442\u044C";\r\n        }, 2000);\r\n      });\r\n\r\n      window.onmessage = (event) => {\r\n        const msg = event.data.pluginMessage;\r\n        if (!msg || !msg.type) {\r\n          return;\r\n        }\r\n        // \u041F\u0435\u0440\u0435\u0441\u044B\u043B\u0430\u0435\u043C, \u0430 \u043D\u0435 \u0432\u0435\u0448\u0430\u0435\u043C \u0432\u0442\u043E\u0440\u043E\u0439 \u0441\u043B\u0443\u0448\u0430\u0442\u0435\u043B\u044C: \u0434\u0432\u0430 \u0434\u0438\u0441\u043F\u0435\u0442\u0447\u0435\u0440\u0430 \u0440\u0430\u043D\u043E \u0438\u043B\u0438\r\n        // \u043F\u043E\u0437\u0434\u043D\u043E \u043E\u0431\u0440\u0430\u0431\u043E\u0442\u0430\u044E\u0442 \u043E\u0434\u043D\u043E \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435 \u0434\u0432\u0430\u0436\u0434\u044B, \u0438 \u043F\u043E\u0440\u044F\u0434\u043E\u043A \u043C\u0435\u0436\u0434\u0443 \u043D\u0438\u043C\u0438 \u043D\u0435\u0432\u0438\u0434\u0438\u043C.\r\n        if (psdBridge.handleMessage(msg)) {\r\n          return;\r\n        }\r\n        if (msg.type === "pluginVersion") {\r\n          const nextVersion =\r\n            typeof msg.version === "string" ? msg.version : "";\r\n          const previousVersion = pluginCurrentVersion;\r\n          pluginCurrentVersion = nextVersion;\r\n          setPluginVersionFooterLabel(nextVersion);\r\n          if (nextVersion.length > 0 && nextVersion !== previousVersion) {\r\n            postToPlugin({ type: "getUpdateBannerDismissed" });\r\n          }\r\n          return;\r\n        }\r\n        if (msg.type === "layerNamePresets") {\r\n          if (Array.isArray(msg.presets) && msg.presets.length > 0) {\r\n            namePresets = msg.presets;\r\n            customIds = {};\r\n            for (const id of msg.customIds || []) {\r\n              customIds[id] = true;\r\n            }\r\n            editingNodeId = null;\r\n            pendingAddParentId = undefined;\r\n            confirmingDeleteId = null;\r\n            renderNamesTree();\r\n            renderResetControl();\r\n            if (isEditingPresets) {\r\n              setPreview("");\r\n            }\r\n          }\r\n          namesUndoEl.classList.toggle("is-visible", Boolean(msg.canUndo));\r\n          if (msg.notice) {\r\n            namesStatusEl.textContent = msg.notice;\r\n          }\r\n          return;\r\n        }\r\n        if (msg.type === "selectionChanged") {\r\n          setSelectionCount(\r\n            typeof msg.count === "number" && msg.count > 0 ? msg.count : 0\r\n          );\r\n          return;\r\n        }\r\n        if (msg.type === "recentNamePresets") {\r\n          recentTemplates = Array.isArray(msg.templates)\r\n            ? msg.templates.slice(0, RECENT_LIMIT)\r\n            : [];\r\n          renderRecent();\r\n          return;\r\n        }\r\n        if (msg.type === "renameLayersResult") {\r\n          const names = Array.isArray(msg.names) ? msg.names : [];\r\n          if (!msg.ok && names.length === 0) {\r\n            namesStatusEl.textContent = msg.error || "\u0427\u0442\u043E-\u0442\u043E \u043F\u043E\u0448\u043B\u043E \u043D\u0435 \u0442\u0430\u043A.";\r\n            return;\r\n          }\r\n          let text = "\u0413\u043E\u0442\u043E\u0432\u043E \u2014 \u043F\u0435\u0440\u0435\u0438\u043C\u0435\u043D\u043E\u0432\u0430\u043D\u043E " + pluralLayers(msg.renamed) + ".";\r\n          if (names.length === 1) {\r\n            text += "\\n" + names[0];\r\n          } else if (names.length > 1) {\r\n            text += "\\n" + names[0] + " \u2026 " + names[names.length - 1];\r\n          }\r\n          if (msg.error) {\r\n            text += "\\n" + msg.error;\r\n          }\r\n          namesStatusEl.textContent = text;\r\n          return;\r\n        }\r\n        if (msg.type === "updateBannerDismissed") {\r\n          dismissedRemoteVersion =\r\n            msg.dismissedRemoteVersion === null ||\r\n            msg.dismissedRemoteVersion === undefined\r\n              ? null\r\n              : String(msg.dismissedRemoteVersion);\r\n          runUpdateCheck();\r\n          return;\r\n        }\r\n        if (msg.type === "done") {\r\n          goRasterEl.disabled = false;\r\n          if (msg.ok) {\r\n            rasterStatusEl.textContent =\r\n              "\u0413\u043E\u0442\u043E\u0432\u043E \u2014 \u043E\u0431\u0440\u0430\u0431\u043E\u0442\u0430\u043D\u043E " + pluralLayers(msg.done) + ".";\r\n            return;\r\n          }\r\n          let text = "";\r\n          if (msg.done > 0) {\r\n            text += "\u041E\u0431\u0440\u0430\u0431\u043E\u0442\u0430\u043D\u043E: " + pluralLayers(msg.done) + ".\\n";\r\n          }\r\n          if (msg.errors && msg.errors.length) {\r\n            text += msg.errors.join("\\n");\r\n          } else if (msg.error) {\r\n            text += msg.error;\r\n          } else {\r\n            text += "\u0427\u0442\u043E-\u0442\u043E \u043F\u043E\u0448\u043B\u043E \u043D\u0435 \u0442\u0430\u043A.";\r\n          }\r\n          rasterStatusEl.textContent = text;\r\n          return;\r\n        }\r\n        if (msg.type === "multipleOfFourCheckResult") {\r\n          setMo4Busy(false);\r\n          renderMo4List(msg.violations || []);\r\n          const parts = [];\r\n          if (msg.violations && msg.violations.length) {\r\n            parts.push(\r\n              "\u041D\u0430\u0448\u043B\u043E\u0441\u044C " +\r\n                pluralLayers(msg.violations.length) +\r\n                " \u0441 \u043D\u0430\u0440\u0443\u0448\u0435\u043D\u0438\u0435\u043C \u2014 \u043E\u0441\u0442\u0430\u0432\u0438\u043B \u0438\u0445 \u0432 \u0432\u044B\u0434\u0435\u043B\u0435\u043D\u0438\u0438."\r\n            );\r\n          } else {\r\n            parts.push("\u0412\u0441\u0435 \u0441\u043B\u043E\u0438 \u043A\u0440\u0430\u0442\u043D\u044B 4 \u2014 \u043D\u0430\u0440\u0443\u0448\u0435\u043D\u0438\u0439 \u043D\u0435\u0442.");\r\n          }\r\n          if (msg.skipped && msg.skipped.length) {\r\n            parts.push("\u041F\u0440\u043E\u043F\u0443\u0449\u0435\u043D\u043E: " + msg.skipped.length + ".");\r\n          }\r\n          mo4StatusEl.textContent = parts.join(" ");\r\n          return;\r\n        }\r\n        if (msg.type === "multipleOfFourFixResult") {\r\n          setMo4Busy(false);\r\n          renderMo4Debug(msg.debug);\r\n          let text = "";\r\n          if (msg.fixedParents > 0) {\r\n            text +=\r\n              "\u041E\u0431\u0435\u0440\u043D\u0443\u0442\u043E: " + pluralLayers(msg.fixedParents) + ".";\r\n          }\r\n          if (msg.skipped > 0) {\r\n            text +=\r\n              (text ? " " : "") +\r\n              "\u041F\u0440\u043E\u043F\u0443\u0449\u0435\u043D\u043E: " +\r\n              msg.skipped +\r\n              " (\u043D\u0435\u0442 absoluteRenderBounds \u0438\u043B\u0438 \u043D\u0435\u043B\u044C\u0437\u044F \u043F\u043E\u0434\u043E\u0433\u043D\u0430\u0442\u044C \u0440\u043E\u0434\u0438\u0442\u0435\u043B\u044F).";\r\n          }\r\n          if (msg.errors && msg.errors.length) {\r\n            text += (text ? "\\n" : "") + msg.errors.join("\\n");\r\n          }\r\n          if (!text) {\r\n            text = msg.ok ? "\u0413\u043E\u0442\u043E\u0432\u043E." : "\u0427\u0442\u043E-\u0442\u043E \u043F\u043E\u0448\u043B\u043E \u043D\u0435 \u0442\u0430\u043A.";\r\n          }\r\n          mo4StatusEl.textContent = text;\r\n        }\r\n      };\r\n\r\n      function requestPluginVersionFromMain() {\r\n        postToPlugin({ type: "requestPluginVersion" });\r\n      }\r\n\r\n      requestPluginVersionFromMain();\r\n      if (document.readyState !== "complete") {\r\n        window.addEventListener("load", requestPluginVersionFromMain);\r\n      }\r\n      setTimeout(requestPluginVersionFromMain, 200);\r\n      setTimeout(requestPluginVersionFromMain, 800);\r\n    </script>\r\n  </body>\r\n</html>\r\n', {
   width: 320,
   height: 560,
   themeColors: true,
@@ -3515,15 +1655,15 @@ function collectCustomIds(tree) {
   };
   collect(defaultPresetTree());
   const ids = [];
-  const walk = (nodes) => {
+  const walk2 = (nodes) => {
     for (const node of nodes) {
       if (standard[node.id] !== node.template) {
         ids.push(node.id);
       }
-      if (node.children) walk(node.children);
+      if (node.children) walk2(node.children);
     }
   };
-  walk(tree);
+  walk2(tree);
   return ids;
 }
 function postSelectionToUi() {
@@ -3533,7 +1673,7 @@ function postSelectionToUi() {
   });
 }
 function postBootstrapToUi() {
-  figma.ui.postMessage({ type: "pluginVersion", version: "1.4.0" });
+  figma.ui.postMessage({ type: "pluginVersion", version: "1.5.0" });
   postSelectionToUi();
   if (presetTreeLoaded) {
     postPresetTreeToUi();
@@ -3616,6 +1756,22 @@ figma.ui.onmessage = async (raw) => {
   }
   if (raw.type === "rasterize") {
     figma.ui.postMessage(await runRasterize(raw));
+    return;
+  }
+  if (raw.type === "psdExportStart") {
+    await runPsdExport(raw);
+    return;
+  }
+  if (raw.type === "psdExportLayerAck") {
+    resolvePsdAck(raw.sessionId, raw.index);
+    return;
+  }
+  if (raw.type === "psdExportCancel") {
+    cancelPsdExport(raw.sessionId);
+    return;
+  }
+  if (raw.type === "psdExportNotify") {
+    figma.notify(raw.text, { error: raw.isError === true });
     return;
   }
   if (raw.type === "multipleOfFourCheck") {

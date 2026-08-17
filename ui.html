@@ -30,7 +30,7 @@
       /* Сегментированные вкладки */
       .tabs {
         display: flex;
-        gap: 4px;
+        gap: 3px;
         padding: 3px;
         margin-bottom: 14px;
         border-radius: var(--radius-md);
@@ -38,10 +38,15 @@
       }
       .tabs button {
         flex: 1;
+        /* Без min-width: 0 флекс-кнопка не сжимается ниже своего текста,
+           и четвёртая вкладка выдавливает ряд за пределы окна 320 px. */
+        min-width: 0;
         margin: 0;
-        padding: 7px 4px;
+        padding: 7px 3px;
         font-size: 11px;
         white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
         border: none;
         background: transparent;
         color: var(--figma-color-text-secondary);
@@ -200,6 +205,24 @@
       }
       .status:empty {
         display: none;
+      }
+
+      /* Прогресс экспорта PSD */
+      .psd-progress {
+        margin-top: 12px;
+        height: 4px;
+        border-radius: 2px;
+        background: var(--figma-color-bg-secondary);
+        overflow: hidden;
+      }
+      .psd-progress[hidden] {
+        display: none;
+      }
+      .psd-progress-bar {
+        height: 100%;
+        width: 0%;
+        background: var(--accent);
+        transition: width 0.12s linear;
       }
 
       /* Лог диагностики */
@@ -840,6 +863,15 @@
       >
         Ренейминг
       </button>
+      <button
+        type="button"
+        role="tab"
+        id="tabPsd"
+        aria-selected="false"
+        aria-controls="panelPsd"
+      >
+        PSD
+      </button>
     </div>
 
     <div
@@ -1041,20 +1073,107 @@
       </details>
     </div>
 
+    <div id="panelPsd" class="panel" role="tabpanel" aria-labelledby="tabPsd">
+      <p class="hint">
+        Собирает из выделенного фрейма файл .psd: каждый слой Figma становится
+        слоем Photoshop, группы и имена сохраняются.
+      </p>
+
+      <label class="field" for="psdScale">Масштаб</label>
+      <select id="psdScale" aria-label="Масштаб экспорта в PSD">
+        <option value="1">1×</option>
+        <option value="2">2×</option>
+        <option value="3">3×</option>
+        <option value="4">4×</option>
+      </select>
+
+      <button type="button" class="primary action-full" id="goPsd">
+        Собрать PSD
+      </button>
+      <button type="button" class="secondary action-full" id="psdCancel" hidden>
+        Отменить
+      </button>
+
+      <div class="psd-progress" id="psdProgressWrap" hidden>
+        <div class="psd-progress-bar" id="psdProgressBar"></div>
+      </div>
+
+      <div class="status" id="psdStatus" role="status"></div>
+
+      <div class="list-wrap" id="psdWarnWrap" aria-label="Замечания экспорта" hidden>
+        <div class="list-header">
+          <span>Замечания</span>
+        </div>
+        <div class="list-body" id="psdWarnBody"></div>
+      </div>
+
+      <details>
+        <summary>Что переносится, а что нет</summary>
+        <ul>
+          <li>
+            Фрейм, группа, компонент и инстанс становятся <b>папкой</b>;
+            всё остальное — обычным слоем с картинкой.
+          </li>
+          <li>
+            Текст, прозрачность и режимы наложения <b>запекаются в пиксели</b>:
+            в Photoshop слой выглядит как в Figma, но правится как растр.
+          </li>
+          <li>
+            Скрытые слои не переносятся. Группа с маской приезжает
+            <b>одним готовым слоем</b>.
+          </li>
+          <li>
+            Фрейм с собственной заливкой или эффектом тоже схлопывается
+            в один слой — иначе картинка разъедется.
+          </li>
+        </ul>
+      </details>
+    </div>
+
     <p id="pluginVersionFooter" class="plugin-version-footer" aria-live="polite">
       Версия: …
     </p>
+
+    <!-- Сюда build.cjs вставляет собранный src/ui/psdExport.ts (ag-psd).
+         В репозитории здесь пусто: ui.html читают люди, бандл — машины. -->
+    <script id="kgpPsdBundle">/* __KGP_PSD_BUNDLE__ */</script>
 
     <script>
       const tabRaster = document.getElementById("tabRaster");
       const tabMo4 = document.getElementById("tabMo4");
       const tabNames = document.getElementById("tabNames");
+      const tabPsd = document.getElementById("tabPsd");
       const panelRaster = document.getElementById("panelRaster");
       const panelMo4 = document.getElementById("panelMo4");
       const panelNames = document.getElementById("panelNames");
+      const panelPsd = document.getElementById("panelPsd");
       const rasterStatusEl = document.getElementById("rasterStatus");
       const mo4StatusEl = document.getElementById("mo4Status");
       const namesStatusEl = document.getElementById("namesStatus");
+      const psdStatusEl = document.getElementById("psdStatus");
+      const psdScaleEl = document.getElementById("psdScale");
+      const goPsdEl = document.getElementById("goPsd");
+      const psdCancelEl = document.getElementById("psdCancel");
+      const psdProgressWrapEl = document.getElementById("psdProgressWrap");
+      const psdProgressBarEl = document.getElementById("psdProgressBar");
+      const psdWarnWrapEl = document.getElementById("psdWarnWrap");
+      const psdWarnBodyEl = document.getElementById("psdWarnBody");
+
+      // В .ui-preview.html (стенд вёрстки вне Figma) бандла нет — не падаем.
+      const psdBridge =
+        typeof KGP_PSD !== "undefined"
+          ? KGP_PSD
+          : {
+              configure() {},
+              handleMessage() {
+                return false;
+              },
+              cancel() {},
+              reset() {},
+              isBusy() {
+                return false;
+              },
+            };
       const scaleEl = document.getElementById("scale");
       const originalDispositionEl = document.getElementById("originalDisposition");
       const goRasterEl = document.getElementById("goRaster");
@@ -1081,6 +1200,7 @@
         { name: "raster", tab: tabRaster, panel: panelRaster, status: rasterStatusEl },
         { name: "mo4", tab: tabMo4, panel: panelMo4, status: mo4StatusEl },
         { name: "names", tab: tabNames, panel: panelNames, status: namesStatusEl },
+        { name: "psd", tab: tabPsd, panel: panelPsd, status: psdStatusEl },
       ];
 
       function setTab(which) {
@@ -1088,7 +1208,9 @@
           const active = entry.name === which;
           entry.tab.setAttribute("aria-selected", active ? "true" : "false");
           entry.panel.classList.toggle("is-active", active);
-          if (!active) {
+          // Прогресс идущего экспорта не гасим: он переживает уход на другую вкладку.
+          const keepStatus = entry.name === "psd" && psdBridge.isBusy();
+          if (!active && !keepStatus) {
             entry.status.textContent = "";
           }
         }
@@ -2103,6 +2225,64 @@
         });
       });
 
+      function renderPsdWarnings(warnings) {
+        psdWarnBodyEl.innerHTML = "";
+        if (!warnings || warnings.length === 0) {
+          psdWarnWrapEl.hidden = true;
+          return;
+        }
+        psdWarnWrapEl.hidden = false;
+        for (const warning of warnings) {
+          const row = document.createElement("div");
+          row.className = "list-item";
+          row.textContent = warning;
+          psdWarnBodyEl.appendChild(row);
+        }
+      }
+
+      function setPsdBusy(busy) {
+        goPsdEl.disabled = busy;
+        psdCancelEl.hidden = !busy;
+        psdProgressWrapEl.hidden = !busy;
+        if (!busy) {
+          psdProgressBarEl.style.width = "0%";
+        }
+      }
+
+      psdBridge.configure({
+        postToPlugin,
+        onProgress(done, total, layerName) {
+          const share = total > 0 ? Math.round((done / total) * 100) : 0;
+          psdProgressBarEl.style.width = share + "%";
+          if (done < total) {
+            psdStatusEl.textContent =
+              "Слой " + (done + 1) + " из " + total + (layerName ? " — " + layerName : "");
+          } else {
+            psdStatusEl.textContent = "Собираю файл…";
+          }
+        },
+        onStatus(text) {
+          psdStatusEl.textContent = text;
+        },
+        onWarnings: renderPsdWarnings,
+        onBusy: setPsdBusy,
+      });
+
+      goPsdEl.addEventListener("click", () => {
+        psdStatusEl.textContent = "Готовлю экспорт…";
+        renderPsdWarnings([]);
+        psdBridge.reset();
+        setPsdBusy(true);
+        postToPlugin({
+          type: "psdExportStart",
+          scale: parseFloat(psdScaleEl.value),
+        });
+      });
+
+      psdCancelEl.addEventListener("click", () => {
+        psdBridge.cancel();
+      });
+
       mo4CheckEl.addEventListener("click", () => {
         mo4StatusEl.textContent = "";
         setMo4Busy(true);
@@ -2150,6 +2330,11 @@
       window.onmessage = (event) => {
         const msg = event.data.pluginMessage;
         if (!msg || !msg.type) {
+          return;
+        }
+        // Пересылаем, а не вешаем второй слушатель: два диспетчера рано или
+        // поздно обработают одно сообщение дважды, и порядок между ними невидим.
+        if (psdBridge.handleMessage(msg)) {
           return;
         }
         if (msg.type === "pluginVersion") {
